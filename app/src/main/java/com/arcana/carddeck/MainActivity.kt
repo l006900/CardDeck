@@ -27,7 +27,8 @@ import androidx.compose.ui.unit.sp
  * CardDeck 库的验证 sample：三个页面分别验证
  * 1) 高层扇形牌堆控件 [CardDeck]；
  * 2) 低层通用场景图 [SpriteStage]（布局 / 翻面 / 光晕 / 粒子 / 拖动）；
- * 3) 200 张卡同屏对跑的性能对比（Compose 原生 vs OpenGL 场景图）。
+ * 3) 200 张卡同屏对跑的性能对比（Compose 原生 vs OpenGL 场景图）；
+ * 4) [CompositeDemo]：GPU 合成管线（视频渲染 / 多画面拼接 / shader 链 / 帧调度 / 实测指标）。
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,14 +40,14 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun SampleRoot() {
-    var page by remember { mutableIntStateOf(2) }
+    var page by remember { mutableIntStateOf(3) }
     Column(modifier = Modifier.fillMaxSize().background(Color(0xFF070A14))) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(top = 34.dp, start = 12.dp, end = 12.dp, bottom = 6.dp),
         ) {
-            listOf("扇形牌堆", "场景图", "性能对比").forEachIndexed { i, name ->
+            listOf("扇形牌堆", "场景图", "性能", "GPU 合成").forEachIndexed { i, name ->
                 Button(
                     onClick = { page = i },
                     colors = ButtonDefaults.buttonColors(
@@ -59,7 +60,8 @@ fun SampleRoot() {
         when (page) {
             0 -> DeckDemo()
             1 -> SceneDemo()
-            else -> PerfDemo()
+            2 -> PerfDemo()
+            else -> CompositeDemo()
         }
     }
 }
