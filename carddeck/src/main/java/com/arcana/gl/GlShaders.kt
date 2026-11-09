@@ -73,6 +73,8 @@ internal object GlShaders {
         uniform float uTime;
         uniform float uGlow;
         uniform float uReversed;
+        uniform float uFoil;      // 金边/高光总强度（Effects.foil）
+        uniform float uAlpha;     // 图元整体透明度（Pose.alpha）
         varying vec2 vUv;
         varying float vFront;
         varying float vFacingAmount;
@@ -107,14 +109,14 @@ internal object GlShaders {
             float diff = max(dot(N, L), 0.0);
             float spec = pow(max(dot(N, H), 0.0), 34.0);
             tex.rgb *= mix(0.88, 1.0, 0.30 + 0.70 * diff);
-            tex.rgb += gold * spec * (0.20 + 0.62 * graze);
+            tex.rgb += gold * spec * (0.20 + 0.62 * graze) * uFoil;
 
             // ---- 菲涅尔金边：侧棱时点亮，边缘再收一道描边 ----
             float fres = pow(1.0 - clamp(abs(dot(N, V)), 0.0, 1.0), 3.0);
             float ed = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
             float rim = smoothstep(0.085, 0.0, ed);
-            tex.rgb += gold * fres * (0.12 + 0.55 * graze) * (0.45 + 0.55 * rim);
-            tex.rgb += gold * rim * fres * 0.30;
+            tex.rgb += gold * fres * (0.12 + 0.55 * graze) * (0.45 + 0.55 * rim) * uFoil;
+            tex.rgb += gold * rim * fres * 0.30 * uFoil;
 
             // ---- 金箔流光：翻开瞬间沿对角线扫过 ----
             float band = uv.x * 0.8 + uv.y * 0.2;
@@ -128,7 +130,7 @@ internal object GlShaders {
             tex.rgb *= mix(0.82, 1.0, edge);
             tex.rgb *= mix(0.45, 1.0, vFacingAmount);
 
-            gl_FragColor = vec4(tex.rgb, tex.a);
+            gl_FragColor = vec4(tex.rgb, tex.a * uAlpha);
         }
     """
 
