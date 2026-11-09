@@ -30,4 +30,8 @@ dependencyResolutionManagement {
 rootProject.name = "CardDeck"
 include(":app")
 include(":carddeck")
+// 多路合成层（com.arcana.gfx），可独立发布为 com.arcana:gfx。
+// 与 :carddeck 分开是为了让「只要合成能力、不要牌桌控件」的项目能一行依赖接进来，
+// 且不会和宿主自己的 com.arcana.gl 撞名。
+include(":gfx")
  

@@ -5,7 +5,6 @@ import android.opengl.GLSurfaceView
 import android.opengl.Matrix
 import android.os.Handler
 import android.os.Looper
-import com.arcana.gl.GlUtil
 import java.util.concurrent.ConcurrentHashMap
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10

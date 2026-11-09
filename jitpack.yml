@@ -1,0 +1,23 @@
+# JitPack 构建配置 —— https://docs.jitpack.io/building/
+#
+# 消费坐标（多模块，取 artifactId）：
+#   com.github.l006900.CardDeck:gfx:<tag>        合成层（推荐，自包含、不撞包名）
+#   com.github.l006900.CardDeck:carddeck:<tag>   牌桌控件（api 依赖 gfx）
+#
+# 三个关键点，改这个文件前先读：
+# 1. :app 是 demo，不发布；只装两个 library 模块。
+# 2. gfx 有 320 行 C++（帧时钟 + GPU 计时），必须 NDK 27.0.12077973 与 CMake 3.22.1。
+#    JitPack 的 Android 镜像默认没有这一组版本，所以先 sdkmanager 装上再构建。
+# 3. 本仓库用 Gradle 9.5 + AGP 9.2.1，JDK 要 17（AGP 9 的最低要求）。
+jdk:
+  - openjdk17
+
+before_install:
+  # 先接受 SDK license（非交互），否则 install 会卡在 y/n 上超时。
+  - yes | sdkmanager --licenses > /dev/null || true
+  # 显式装齐构建需要的三样：platform 36（比 37.1 稳）、NDK 27（gfx 的 C++）、CMake 3.22.1。
+  - sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+install:
+  # --no-daemon：JitPack 是单次容器，守护进程只会多吃内存。
+  - ./gradlew :gfx:publishToMavenLocal :carddeck:publishToMavenLocal --no-daemon

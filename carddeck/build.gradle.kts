@@ -4,46 +4,17 @@ plugins {
     `maven-publish`
 }
 
-// 发布坐标。拆分模块时 artifactId 会变（如 arcana-gfx-core），但 group 与
-// 依赖方的写法保持不变，消费方无需改 build 文件。
+// 发布坐标。依赖方只认 group + artifactId，模块怎么拆对它透明。
 group = "com.arcana"
 version = "0.5.0"
 
 android {
     namespace = "com.arcana.carddeck.lib"
-    // 本机 SDK 里可用的 NDK；固定版本避免 AGP 默认版本漂移导致 CMake 重新配置。
-    ndkVersion = "27.0.12077973"
-    compileSdk {
-        version = release(37) {
-            minorApiLevel = 1
-        }
-    }
+    // 与 :gfx 对齐停在 36：minCompileSdk 越低，接库的人越省事（理由见 gfx/build.gradle.kts）。
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 24
-        consumerProguardFiles("consumer-rules.pro")
-        ndk {
-            // 发布产物只带真机 ABI，控制 AAR 体积。
-            abiFilters += "arm64-v8a"
-            abiFilters += "armeabi-v7a"
-        }
-    }
-
-    buildTypes {
-        debug {
-            // 开发期补上 x86_64，让模拟器也能跑（不进 release AAR）。
-            ndk {
-                abiFilters += "x86_64"
-            }
-        }
-    }
-
-    // C++ 帧时钟：固定容量无锁 SPSC 队列 + 延迟分位统计。
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 
     compileOptions {
@@ -63,14 +34,18 @@ android {
 }
 
 dependencies {
+    // 合成层（com.arcana.gfx）单独发布为 com.arcana:gfx，这里 api 传递：
+    // 依赖 :carddeck 的项目照样能直接用 CompositeSurfaceHost / GpuCompositor。
+    api(project(":gfx"))
     // 公开 API 里出现 Compose 类型（Modifier 等），用 api 让消费方无需再声明。
     api(platform(libs.androidx.compose.bom))
     api(libs.androidx.compose.ui)
     api(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui.graphics)
     // 手写 GLSurfaceView + 生命周期，无需 material3。
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.runtime.compose)
+    // 同 :gfx：停在 2.8.x，否则 lifecycle 2.11 会把 minCompileSdk 抬到 37。
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     testImplementation(libs.junit)
 }
 

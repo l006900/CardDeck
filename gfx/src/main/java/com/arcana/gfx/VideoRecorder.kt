@@ -15,7 +15,6 @@ import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
-import com.arcana.gl.GlUtil
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 

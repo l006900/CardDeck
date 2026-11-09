@@ -1,11 +1,5 @@
-package com.arcana.carddeck
+package com.arcana.gfx
 
-import com.arcana.gfx.GpuStats
-import com.arcana.gfx.PresentMode
-import com.arcana.gfx.RenderPolicy
-import com.arcana.gfx.ShaderPasses
-import com.arcana.gfx.TileSpec
-import com.arcana.gfx.Tiles
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

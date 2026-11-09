@@ -1,8 +1,5 @@
-package com.arcana.carddeck
+package com.arcana.gfx
 
-import com.arcana.gfx.GfxShaders
-import com.arcana.gfx.ShaderPass
-import com.arcana.gfx.ShaderPasses
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
