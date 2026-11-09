@@ -15,7 +15,6 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.Range
 import android.view.Surface
-import android.view.WindowManager
 
 /**
  * **Camera2 实时采集源**：摄像头 → SurfaceTexture → `GL_TEXTURE_EXTERNAL_OES` → 合成管线。
@@ -61,10 +60,10 @@ class CameraFrameSource(
     @Volatile private var closed = false
 
     /**
-     * 预览帧需要补的旋转角。后置 sensor 通常是 90°，竖屏手持时若直接用
-     * SurfaceTexture 的原图会看到旋转 90° 的画面；这里按
-     * `sensorOrientation - displayRotation` 算出来，在 uv 变换里补上。
-     * 需要特殊朝向时调用方可在 [ready] 之后直接覆盖。
+     * 预览帧旋转角。**当前固定为 0（不旋转）**——采集页/录制直出原始帧朝向，
+     * 由调用方（页面布局）决定是否后期旋转，库侧不做任何 uv 旋转，避免叠加导致翻面。
+     * 历史：曾经按 `sensor - displayRotation` 自动算，结果在部分设备上叠出 180° 翻面，
+     * 故改为不旋转。需要旋转时调用方在 [ready] 之后直接覆盖此值即可。
      */
     @Volatile
     var rotationDeg: Float = 0f
@@ -107,6 +106,11 @@ class CameraFrameSource(
 
     /** 摄像头实际推到 SurfaceTexture 的帧数；0 表示采集链没建立起来。 */
     fun framesArrived(): Long = delegate.framesArrived()
+
+    /** 内禀尺寸与当前旋转角，供合成器做等比 cover 裁剪（避免 4:3 塞进竖列被拉变形）。 */
+    override val contentWidth: Int get() = width
+    override val contentHeight: Int get() = height
+    override val contentRotationDeg: Int get() = rotationDeg.toInt()
 
     /** 页面销毁：停采集、释放 Surface、退出回调线程。任意线程可调。 */
     fun close() {
@@ -154,23 +158,8 @@ class CameraFrameSource(
             null
         }
 
-        rotationDeg = try {
-            val sensor = manager.getCameraCharacteristics(id)
-                .get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-            val display = (context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager)
-                ?.defaultDisplay?.rotation ?: Surface.ROTATION_0
-            val displayDeg = when (display) {
-                Surface.ROTATION_90 -> 90
-                Surface.ROTATION_180 -> 180
-                Surface.ROTATION_270 -> 270
-                else -> 0
-            }
-            // uv 空间里 Matrix.rotateM 是逆时针；sensor 给的是「画面相对自然方向
-            // 顺时针偏了多少」，所以取负角（+720 保证取模前为正）。
-            ((displayDeg - sensor + 720) % 360).toFloat()
-        } catch (_: Throwable) {
-            0f
-        }
+        // 旋转角固定为 0：库侧不做任何 uv 旋转，原始帧朝向直出（见 [rotationDeg] 注释）。
+        rotationDeg = 0f
 
         try {
             manager.openCamera(id, object : CameraDevice.StateCallback() {

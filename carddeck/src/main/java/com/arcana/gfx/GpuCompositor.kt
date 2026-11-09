@@ -100,6 +100,8 @@ class GpuCompositor : GLSurfaceView.Renderer {
 
     private val identity = FloatArray(16)
     private val stScratch = FloatArray(16)
+    /** 等比 cover 裁剪的临时 uv 矩形，避免每次绘制 new 数组。 */
+    private val coverCrop = FloatArray(4)
 
     private var host: GLSurfaceView? = null
     private var surfaceReady = false
@@ -587,7 +589,14 @@ class GpuCompositor : GLSurfaceView.Renderer {
         }
     }
 
-    /** 把一路源画进当前绑定目标的指定 viewport。 */
+    /**
+     * 把一路源画进当前绑定目标的指定 viewport。
+     *
+     * [spec.crop] 是调用方指定的 uv 子区域（画中画 / 多画面拼接用），默认全幅；
+     * 在此之上再叠加一层**等比 cover 裁剪**：按源内禀宽高比（含旋转对调）与瓦片像素宽高比
+     * 算出一个子矩形，让画面「填满瓦片且不拉伸」，多出来的边被裁掉（类似 CSS object-fit: cover）。
+     * 源未提供尺寸（[FrameSource.contentWidth] == 0，如未知尺寸的视频）时跳过，保持旧行为。
+     */
     private fun blitSource(
         program: BlitProgram,
         source: FrameSource,
@@ -599,10 +608,48 @@ class GpuCompositor : GLSurfaceView.Renderer {
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(source.textureTarget, source.textureId())
         GLES20.glUniform1i(program.texture, 0)
-        GLES20.glUniform4f(program.crop, spec.crop[0], spec.crop[1], spec.crop[2], spec.crop[3])
+        val cc = coverCrop(source, spec, vp)
+        GLES20.glUniform4f(program.crop, cc[0], cc[1], cc[2], cc[3])
         GLES20.glUniformMatrix4fv(program.stMatrix, 1, false, source.transform(stScratch), 0)
         GLES20.glUniform1f(program.flipY, if (spec.flipY) 1f else 0f)
         drawQuad(program.pos, program.uv)
+    }
+
+    /**
+     * 计算最终 uv crop（在 [spec.crop] 框定的区域内再做等比 cover 裁剪）。
+     * 返回 [coverCrop]（复用字段，调用方需立即使用，不跨帧持有）。
+     */
+    private fun coverCrop(source: FrameSource, spec: TileSpec, vp: IntArray): FloatArray {
+        val base = spec.crop
+        val cw = source.contentWidth
+        val ch = source.contentHeight
+        // 仅对「已知尺寸的外部媒体源」做适配；程序化/未知尺寸源维持原样（不裁不拉）。
+        if (cw <= 0 || ch <= 0 || !source.external) {
+            coverCrop[0] = base[0]; coverCrop[1] = base[1]; coverCrop[2] = base[2]; coverCrop[3] = base[3]
+            return coverCrop
+        }
+        val tileW = vp[2].toFloat(); val tileH = vp[3].toFloat()
+        val t = if (tileH > 0f) tileW / tileH else 1f          // 瓦片屏幕宽高比 w/h
+        // 旋转 90/270 时内容宽高对调。
+        val swapped = ((source.contentRotationDeg % 180) + 360) % 180 == 90
+        // 在「原始 uv 空间」（旋转前）选子矩形 (su, sv)，旋转后其显示宽高比须 == t。
+        // 旋转后：显示宽 = sv*ch，显示高 = su*cw（90/270）或 显示宽=su*cw, 显示高=sv*ch（0/180）。
+        var su = 1f; var sv = 1f
+        if (swapped) {
+            val r = t * cw / ch                              // sv/su
+            if (r <= 1f) { su = 1f; sv = r } else { sv = 1f; su = 1f / r }
+        } else {
+            val r = t * ch / cw                              // su/sv
+            if (r <= 1f) { sv = 1f; su = r } else { su = 1f; sv = 1f / r }
+        }
+        // 子矩形在原始 uv 居中，再线性映射到 spec.crop 框定的区间（与调用方区域兼容）。
+        val u0 = (1f - su) / 2f; val u1 = (1f + su) / 2f
+        val v0 = (1f - sv) / 2f; val v1 = (1f + sv) / 2f
+        coverCrop[0] = base[0] + u0 * (base[2] - base[0])
+        coverCrop[1] = base[1] + v0 * (base[3] - base[1])
+        coverCrop[2] = base[0] + u1 * (base[2] - base[0])
+        coverCrop[3] = base[1] + v1 * (base[3] - base[1])
+        return coverCrop
     }
 
     /** 把一张 2D 纹理原样画进当前 viewport（不改 viewport，由调用方设好）。 */

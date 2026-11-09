@@ -77,6 +77,18 @@ interface FrameSource {
     /** GL 线程：把 4×4 变换矩阵写进 [out] 并返回（2D 源是单位矩阵）。 */
     fun transform(out: FloatArray): FloatArray
 
+    /**
+     * 源的内禀像素尺寸与「[transform] 里施加的旋转角」，供合成器做**等比 cover 裁剪**，
+     * 避免把 4:3 视频塞进竖列时被拉变形。
+     *
+     * 默认全 0 = 未知尺寸，**跳过适配**（保持旧行为，不会把不该裁的也在裁）；
+     * 有确定尺寸的源（摄像头 / 已知 buffer 的视频）应覆写。
+     */
+    val contentWidth: Int get() = 0
+    val contentHeight: Int get() = 0
+    /** 与 [transform] 一致的旋转角（度），用于判断 90/270 时宽高是否对调。 */
+    val contentRotationDeg: Int get() = 0
+
     /** 这一路源占的显存字节数，用于预算统计。 */
     fun byteCount(): Long
 }
@@ -189,6 +201,11 @@ class ExternalTextureSource(
         return out
     }
 
+    /** 已知 buffer 尺寸时（Camera2 必设）用于 cover 裁剪；未知则 0，跳过适配。 */
+    override val contentWidth: Int get() = bufferWidth
+    override val contentHeight: Int get() = bufferHeight
+    override val contentRotationDeg: Int get() = 0
+
     override fun byteCount(): Long = 0L   // 由 BufferQueue 持有，不计入库自己的显存预算
 
     override fun onGlLost() {
@@ -291,6 +308,9 @@ class DynamicTexture2DSource(
         Matrix.setIdentityM(out, 0)
         return out
     }
+    override val contentWidth: Int get() = width
+    override val contentHeight: Int get() = height
+    override val contentRotationDeg: Int get() = 0
     override fun byteCount(): Long = width.toLong() * height * 4L
     override fun onGlLost() {
         created = false
