@@ -49,6 +49,15 @@ interface FrameSource {
     fun onGlLost()
 
     /**
+     * GL 线程：**只查询**是否已有新帧待消费，不碰 GLES、不消费帧。
+     *
+     * 合成器靠它把「要不要画」交给帧到达决定，而不是用固定 fps 去猜时刻；
+     * 若查询发生在被节流跳过的回调里，帧仍留在 BufferQueue，下次真正绘制时再取最新。
+     * 默认 false：没有外部生产者的源（静态贴图 / CPU 动态纹理）不参与帧驱动。
+     */
+    fun hasPendingFrame(): Boolean = false
+
+    /**
      * GL 线程：把最新一帧锁进纹理。
      * @return 0 = 没有新帧；否则返回该帧的到达时刻（`System.nanoTime()` 基准），供帧延迟统计。
      */
@@ -139,12 +148,15 @@ class ExternalTextureSource(
         onSurfaceReady?.invoke(s)
     }
 
+    override fun hasPendingFrame(): Boolean = pendingCount != consumedCount
+
     override fun update(): Long {
         val st = surfaceTexture ?: return 0L
         val pending = pendingCount
         if (pending == consumedCount || texId == 0) return 0L
         // 一次最多消费 4 帧：长时间后台回来时不至于卡在 while 里，多余帧下次再追。
-        repeat(min(pending - consumedCount, 4L).toInt()) { st.updateTexImage() }
+        val delta = min(pending - consumedCount, 4L).toInt()
+        repeat(delta) { st.updateTexImage() }
         consumedCount = pending
         synchronized(matrixLock) { st.getTransformMatrix(matrix) }
         return lastArrivalNs

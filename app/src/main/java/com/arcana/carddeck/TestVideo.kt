@@ -20,6 +20,13 @@ import kotlin.math.sqrt
  *
  * 图案刻意做成高对比的移动竖条 + 跳动圆 + 色带：肉眼能立刻判断
  * 画面是否在动、有没有上下镜像、四路裁切是不是取到了不同区域。
+ *
+ * 三个运动分量的步长都按 [FRAMES] 严格闭合，保证 90 帧 → 第 0 帧的接缝
+ * 与任意相邻两帧一样平滑；否则每 3 秒 loop 一次就整幅跳一下，
+ * 看起来像"闪回前几帧"：
+ * - 条纹完整周期 54px（27 亮 + 27 暗），每帧移 3px → 90 帧共 270 = 5×54；
+ * - 扫描线周期 24 行，每帧移 4 行 → 90 帧共 360 = 15×24；
+ * - 圆心 sin(frame / 90 × 2π)，首尾相位连续。
  */
 object TestVideo {
 
@@ -124,11 +131,11 @@ object TestVideo {
             val v = y.toFloat() / H
             for (x in 0 until W) {
                 val u = x.toFloat() / W
-                val bar = ((x + frame * 3) / 32) % 2
+                val bar = ((x + frame * 3) / 27) % 2
                 val dx = u - cx
                 val dy = v - cy
                 val circle = if (sqrt(dx * dx + dy * dy) < 0.11f) 1f else 0f
-                val scan = if ((y + frame * 5) % 24 < 3) 0.18f else 0f
+                val scan = if ((y + frame * 4) % 24 < 3) 0.18f else 0f
                 val r = (0.20f + 0.55f * v + 0.20f * bar + circle * 0.55f + scan).coerceIn(0f, 1f)
                 val g = (0.15f + 0.50f * u + circle * 0.25f).coerceIn(0f, 1f)
                 val b = (0.72f - 0.38f * v + bar * 0.12f + scan).coerceIn(0f, 1f)

@@ -49,6 +49,13 @@
 | 源码构建 | 需要 NDK 27 与 CMake 3.22.1（版本写在 `carddeck/build.gradle.kts`）；Kotlin / AGP / Compose BOM 版本以 `gradle/libs.versions.toml` 为准 |
 | 用已构建好的 AAR | 消费方不需要 NDK / CMake（只有从源码构建 AAR 时才需要） |
 
+**16 KB 页兼容**：库里的 `libarcana_frameclock.so`（两个 ABI）在 CMake 里用
+`-Wl,-z,max-page-size=16384` 链接，ELF `PT_LOAD` 的 `p_align = 0x4000`，
+Android 15+ 的 16 KB 内核可直接加载，可调试应用也不会再弹「应用兼容性」警告。
+从源码自行构建时别删掉 `target_link_options`，否则会退回 lld 默认的 4 KB 对齐。
+接入后若仍看到该警告，用 `llvm-readelf -l your.so` 检查**你自己的其它 .so**——
+系统会把 APK 里所有未对齐的库一起列出来（其中一项报「未知错误」也可能只是另一项未对齐的连带结果）。
+
 库**目前没有发布到 Maven Central / JitPack**，用下面两种方式之一接入。
 
 ### 方式 A：源码 module（推荐，依赖可传递）
@@ -297,7 +304,7 @@ fun FourUp(videoPath: String) {
 | --- | --- |
 | `GpuCompositor()` | `tiles` / `passes` / `policy` / `animating` / `frameSink` / `onStats` / `onError`；`register(key, source)` / `unregister` / `invalidate()` / `postGl { }` / `release()` |
 | `CompositeStage(compositor, modifier, policy, onStats, onError)` | 把合成管线放进 Compose，并接管生命周期 |
-| `FrameSource` 实现 | `ExternalTextureSource(name, onSurfaceReady, bufferWidth, bufferHeight)`（OES 视频/摄像头；`framesArrived()` 查推帧数）、`Texture2DSource(bank, key, w, h)`（静态贴图）、`DynamicTexture2DSource(w, h, fill)`（CPU 动态纹理，可用 `active` 停帧） |
+| `FrameSource` 实现 | `ExternalTextureSource(name, onSurfaceReady, bufferWidth, bufferHeight)`（OES 视频/摄像头；`framesArrived()` 查推帧数）、`Texture2DSource(bank, key, w, h)`（静态贴图）、`DynamicTexture2DSource(w, h, fill)`（CPU 动态纹理，可用 `active` 停帧）。自定义源可覆写 `hasPendingFrame()` 参与帧驱动（只查询、不消费，默认 false） |
 | `CameraFrameSource(context, width, height, onFailure)` | Camera2 采集源；`framesArrived()` / `rotationDeg` / `ready` / `close()` |
 | `VideoRecorder(file, width, height, fps, bitRate, onError)` | `start()` / `stop()` / `releaseGl()` / `framesWritten()` / `close()`；实现 `GpuFrameSink` |
 | `GpuFrameSink` | 自定义一帧输出接出点；`onFrame(texture, w, h, ptsNs)` 在 GL 线程回调 |
@@ -363,16 +370,24 @@ compositor.policy = RenderPolicy(RenderMode.ON_DEMAND, maxFps = 30)
 compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开，否则按需渲染会停在静态帧
 ```
 
-- `CONTINUOUS`：按 `maxFps` 硬上限出帧，没到间隔直接跳过整帧绘制。
-- `ON_DEMAND`：落到 `RENDERMODE_WHEN_DIRTY`，只在**新帧到达 / 参数变化 / 显式 `invalidate()`** 时绘制，
-  连 GL 渲染回调都不触发。视频源会自然贴合解码帧率；静态源会完全停住。
+- `CONTINUOUS`：GL 线程按刷新率回调；**布局里没有外部帧源时**按 `maxFps` 硬上限匀速出帧。
+- `ON_DEMAND`：落到 `RENDERMODE_WHEN_DIRTY`，连 GL 渲染回调都不触发，只在有新帧 /
+  参数变化 / 显式 `invalidate()` 时才跑一次。静态源会完全停住。
+
+**外部帧源由帧到达驱动，而不是由 `maxFps` 猜时刻。** 只要布局里引用了 OES 源
+（`ExternalTextureSource` / `CameraFrameSource`），合成器先 `hasPendingFrame()` 只查询、
+不消费：有新帧立刻画，没新帧就不画（不重复贴上一帧），`maxFps` 退化为无帧时的兜底上限。
+真正的 `updateTexImage()` 放在门控**之后**，帧一直留在 `BufferQueue` 里，
+积压多帧时一次追到最新。帧到达与 GL 回调是两个独立时钟，早先「先消费再门控」
+会让被跳过的回调吞掉新帧、绘制回调重复旧帧，画面一顿一顿甚至看起来像「闪回前几帧」。
+门控规则是纯函数 `RenderPolicy.shouldDraw(...)`，有单测覆盖。
 
 `GpuStats`（约每 0.5s 回调一次，已切主线程）里的数字都是实测值，不是估算：
 
 | 字段 | 含义 |
 | --- | --- |
 | `fps` | 只统计**真正渲染**的帧，被策略跳过的帧不计入 |
-| `cpuFrameMs` | GL 线程该帧从进入到返回的墙钟时间（含 GLES 提交，**不含** GPU 执行） |
+| `cpuFrameMs` | GL 线程该帧从进入到**整帧工作做完**的墙钟时间（含 GLES 提交与指标窗口开销，**不含** GPU 执行）。别在帧中途提前算，会漏掉最慢的那一段 |
 | `gpuFrameMs` | `GL_EXT_disjoint_timer_query` 实测的 GPU 执行时间；`-1` = 设备不支持或本轮 disjoint 作废，HUD 应显示 `n/a`，不要拿 CPU 时间冒充 |
 | `cpuPercent` / `pssKb` / `graphicsPssKb` / `nativeHeapKb` | 进程 CPU 占用（多核可 >100%）、`Debug.MemoryInfo` 的 PSS 分项、native heap |
 | `powerMw` | 整机瞬时功率（电流 µA × 电压 mV），`-1` = 设备不给读数；**只适合同机 A/B 对比**，不是本库单独的功耗 |
@@ -382,8 +397,17 @@ compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开�
 | `droppedFrames` | 指标窗口内生产者入队时队列已满的累计次数，背压信号 |
 | `encodedFrames` | 最近一次录制会话送进编码器的帧数 |
 
-系统级采样（`Debug.getMemoryInfo`、读 `/proc/self/stat`）只在 0.5s 指标窗口里做一次，
-不进每帧热路径，采样开销也就不会污染它自己要测的 CPU 数字。
+**系统级采样绝对不能落在 GL 线程。** `Debug.getMemoryInfo()`、
+`registerReceiver(null, ACTION_BATTERY_CHANGED)`、读 `/proc/self/stat` 都是同步 binder / 文件 IO，
+真机单次约 **50ms**。即使只在 0.5s 指标窗口调一次，只要那次调用在 `onDrawFrame` 里，
+就会每半秒卡掉 1~2 个 vsync，画面规律性地顿一下，连解码线程的帧投递都会被一起拖慢。
+库的 `SystemMeters` 跑在独立的 `gfx-meters` 线程：`requestSample()` 只投递任务立即返回，
+`latest()` 读上一次结果（零系统调用），`lastCostMs` 给出采样真实耗时。
+指标本来就是 0.5s 粒度，晚一个窗口不影响口径。
+
+> 排查口诀：**「每 0.5 秒规律顿一下、但 fps/cpu 指标看着正常」先查指标窗口里有没有同步系统调用**，
+> 别去看视频源或帧调度。早期版本还把 `cpuFrameMs` 算在采样之前，那 50ms 完全不进指标，
+> HUD 一路显示正常，只有肉眼能看出来。
 
 **按需渲染的三个前提**（自己写 HUD 时最容易忽略）：
 
@@ -504,6 +528,10 @@ recorder.close()
 | HUD 显示 `gpu n/a` / `power n/a` | 设备不支持 `GL_EXT_disjoint_timer_query` 或不提供电流读数；这是如实降级，不是初始化失败 |
 | HUD 数字尾部被裁掉（`p95 53.2 r`、`power 25 m`） | 单行 `softWrap = false` 只防纵向换行，横向会硬裁。按宽度自适应字号，或拆两行并给两行都留固定高度；别直接缩短指标字符串，数值位数一变还会重现 |
 | 按需渲染停不下来、显示 1~2 fps | HUD 行数或高度变化引起 `onSurfaceChanged` 自激，见上文「按需渲染的三个前提」 |
+| 画面每 0.5 秒规律顿一下，但 fps / cpu 指标看着正常 | 系统级采样（PSS、电量、`/proc`）在 GL 线程同步执行，单次可达 50ms。挪到独立线程，并确认 `cpuFrameMs` 是在整帧结束后才取的。自己接 `GpuCompositor`、在指标回调里顺手读系统状态时尤其容易踩 |
+| Android 15+ 弹「应用兼容性：不符合 16 KB 对齐要求」 | 检查 APK 里每个 `.so` 的 `PT_LOAD p_align` 是否为 `0x4000`；本库已对齐，通常是接入方自己的 native 库仍是 4 KB。可调试应用才弹这个警告，但不代表 release 包能在 16 KB 内核上正常加载 |
+| 视频画面一顿一顿、像「闪回前几帧」 | 先分清是渲染层还是内容层：渲染层看 `fps` 是否贴近源帧率、`jitterP95Ms` 是否异常（它量的是**源**的帧到达抖动）；内容层看测试图案的循环接缝是否闭合。库侧已由帧到达驱动，自定义 `FrameSource` 要覆写 `hasPendingFrame()`，别在 `update()` 之外偷偷消费帧。短视频在 60Hz 屏上解码时偶发 67ms 双间隔属正常节拍差 |
+| 自写源接进来后画面不动 | 布局里有 OES 源时合成器是帧驱动：没有新帧就不画。确认 `hasPendingFrame()` 有覆写、`frameSink` 已接到生产者的帧到达事件 |
 
 ---
 

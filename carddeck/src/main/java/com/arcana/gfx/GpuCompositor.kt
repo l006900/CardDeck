@@ -192,6 +192,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
         timing.close()
         gpuTimer.onGlLost()
         gpuTimer.close()
+        systemMeters?.close()
         host = null
     }
 
@@ -257,23 +258,42 @@ class GpuCompositor : GLSurfaceView.Renderer {
         if (released || !surfaceReady) return
         val renderNs = System.nanoTime()
 
-        // 1) 锁进**当前布局实际用到**的源的最新帧（GL 线程独占 GLES）。
-        //    注册了但没被任何 tile 引用的源不做上传/锁帧，省掉无谓的带宽与功耗。
         val specs = tiles
         val active = activeSourceKeys
-        var newFrame = false
-        for ((key, s) in sources) {
-            if (!active.contains(key)) continue
-            if (s.update() != 0L) newFrame = true
-        }
-
-        // 2) 帧门控：未到间隔 / 无新帧且非连续模式 → 直接返回，省掉整帧 GPU 负载
         val currentPolicy = policy
-        if (renderNs - lastDrawNs < currentPolicy.frameIntervalNs() - FRAME_TOLERANCE_NS) return
-        if (currentPolicy.mode == RenderMode.ON_DEMAND &&
-            !newFrame && !dirty && !animating
+
+        // 1) **只查询、不消费**：帧到达与 GL 回调是两个独立时钟。
+        //    旧实现先 updateTexImage() 再做 maxFps 门控，被跳过的回调照样把新帧取走：
+        //    真机 8s 里 163 次 SKIP 带着新帧、142 次 DRAW 却没有新帧（重复上一帧），
+        //    连续两个跳过回调各来一帧时前一帧直接被覆盖。绘制间隔 p95 67.8ms，
+        //    高频条纹图案在这种非均匀重采样下会出现"闪回前几帧"的相位错觉。
+        var pending = false
+        for ((key, s) in sources) {
+            if (active.contains(key) && s.hasPendingFrame()) {
+                pending = true
+                break
+            }
+        }
+        // 布局里只要有外部帧源，渲染就由帧到达驱动（30fps 源天然就是 30fps）；
+        // maxFps 退化为「无帧时」的兜底上限，只对纯程序化 / 动画源做限速。
+        val frameDriven = active.any { sources[it]?.external == true }
+        val intervalOk = renderNs - lastDrawNs >= currentPolicy.frameIntervalNs() - FRAME_TOLERANCE_NS
+        if (!RenderPolicy.shouldDraw(
+                pending = pending,
+                dirty = dirty,
+                animating = animating,
+                intervalOk = intervalOk,
+                mode = currentPolicy.mode,
+                frameDriven = frameDriven,
+            )
         ) return
-        // 分辨率 / 显存预算是策略的一部分：变化时在真正绘制前重建离屏目标。
+
+        // 2) 真正要画了才锁帧：注册了但没被 tile 引用的源不碰 GLES；
+        //    队列里若积压了多帧，update() 会一次追到最新，不再把旧帧显示出来。
+        for ((key, s) in sources) {
+            if (active.contains(key)) s.update()
+        }
+        // 3) 分辨率 / 显存预算是策略的一部分：变化时在真正绘制前重建离屏目标。
         if (currentPolicy.resolutionScale != appliedPolicyScale ||
             currentPolicy.maxTextureBytes != appliedBudget || targets.read.texture == 0
         ) ensureTargets()
@@ -367,7 +387,6 @@ class GpuCompositor : GLSurfaceView.Renderer {
         frameSink?.onFrame(targets.read.texture, sceneW, sceneH, renderNs)
 
         // 7) 指标：只统计真正渲染的帧，跳过的帧不算进 FPS
-        val cpuFrameMs = (System.nanoTime() - renderNs) / 1_000_000f
         val latency = timing.drain(renderNs)
         // native 的 dropped 是 exchange(0)，每帧都要累加，否则 0.5s 窗口里只看到最后一次。
         windowDropped += latency[4].toInt()
@@ -381,13 +400,15 @@ class GpuCompositor : GLSurfaceView.Renderer {
             var bytes = targets.bytes()
             for (p in tilePairs) bytes += p.bytes()
             for ((key, s) in sources) if (active.contains(key)) bytes += s.byteCount()
-            // 系统级采样只在指标窗口里做一次，不进每帧热路径，也不污染它要测的 CPU 数字。
-            val sys = systemMeters?.sample()
+            // 系统采样投递到独立后台线程：同步 binder 单次约 50ms，绝不能落在 GL 线程。
+            systemMeters?.requestSample()
+            val sys = systemMeters?.latest()
             val sink = frameSink
             if (sink != null) lastEncodedFrames = sink.framesWritten()
             val snapshot = GpuStats(
                 fps = fps,
-                cpuFrameMs = cpuFrameMs,
+                // 在整帧工作做完后取；旧实现在采样前就算完了，把最慢的 50ms 漏得干干净净。
+                cpuFrameMs = (System.nanoTime() - renderNs) / 1_000_000f,
                 drawCalls = draws,
                 gpuPasses = passCount,
                 textureBytes = bytes,

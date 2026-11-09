@@ -59,6 +59,33 @@ data class RenderPolicy(
             }
             return SCALE_STEPS.last()
         }
+
+        /**
+         * 纯函数：这一帧要不要真的画。把「帧驱动 vs fps 节流」这段最容易写错的门控
+         * 抽出来单测 —— 旧实现先消费帧再门控，被跳过的回调吞掉新帧、绘制回调又
+         * 重复上一帧，画面就会一顿一顿甚至看起来「闪回前几帧」。
+         *
+         * - [pending]：有外部帧源的新帧待消费。有新帧一律画，帧到达本身就是节拍，
+         *   不再拿 [intervalOk] 去猜时刻。
+         * - [frameDriven]：布局里有 OES 外部源。这类布局没有新帧时也不画，避免把
+         *   同一视频帧重复贴屏；纯程序化源仍按 [intervalOk] 匀速出帧。
+         * - [dirty]：参数 / 布局变化要立刻生效，不受 fps 上限拖到下一轮。
+         * - [animating]：依赖 uTime 的动态 shader，仍受 [intervalOk] 限速。
+         */
+        fun shouldDraw(
+            pending: Boolean,
+            dirty: Boolean,
+            animating: Boolean,
+            intervalOk: Boolean,
+            mode: RenderMode,
+            frameDriven: Boolean,
+        ): Boolean {
+            if (!pending && !dirty && !intervalOk) return false
+            if (!pending && !dirty && !animating &&
+                (mode == RenderMode.ON_DEMAND || frameDriven)
+            ) return false
+            return true
+        }
     }
 }
 

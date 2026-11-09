@@ -79,6 +79,7 @@ class CameraFrameSource(
 
     override fun onGlCreated() = delegate.onGlCreated()
     override fun onGlLost() = delegate.onGlLost()
+    override fun hasPendingFrame(): Boolean = delegate.hasPendingFrame()
     override fun update(): Long = delegate.update()
     override fun textureId(): Int = delegate.textureId()
 

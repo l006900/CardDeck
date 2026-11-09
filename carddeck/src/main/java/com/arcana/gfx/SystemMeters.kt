@@ -5,10 +5,13 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Debug
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
 import android.system.Os
 import android.system.OsConstants
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /**
@@ -29,13 +32,52 @@ data class SystemSample(
 )
 
 /**
- * **CPU / 内存 / 功耗**采样器。
+ * **CPU / 内存 / 功耗**采样器，跑在自己的后台线程上。
  *
- * 这些接口（`Debug.getMemoryInfo`、读 `/proc/self/stat`）都有毫秒级开销，
- * 所以只在 [GpuCompositor] 的 0.5s 指标窗口里调一次，绝不进每帧热路径；
- * 采样本身也就不会污染它要测的那个 CPU 数字。
+ * `Debug.getMemoryInfo()`、`registerReceiver(null, ACTION_BATTERY_CHANGED)` 和读
+ * `/proc/self/stat` 都是同步 binder / 文件 IO，**真机单次约 50ms**。以前虽然只在
+ * 0.5s 指标窗口调一次，但那次调用就在 GL 线程里：每半秒直接卡掉 1~2 个 vsync，
+ * 画面规律性地顿一下，而 `cpuFrameMs` 又因为先算完而漏记这 50ms，指标完全看不出来。
+ *
+ * 现在 [requestSample] 只投递任务并立即返回，[latest] 读上一次结果（零系统调用）。
+ * 指标天然是 0.5s 粒度，晚一个窗口不影响口径，但绝不能让采样阻塞渲染线程。
  */
-class SystemMeters(context: Context) {
+class SystemMeters(context: Context) : AutoCloseable {
+
+    private val worker = HandlerThread("gfx-meters").apply { start() }
+    private val handler = Handler(worker.looper)
+    private val sampling = AtomicBoolean(false)
+
+    /** 上一次后台采样结果，GL 线程只读这个引用。 */
+    @Volatile
+    private var cached = SystemSample()
+
+    /** 上一次采样的真实耗时（ms），仅供 HUD / 排错观察，不参与指标计算。 */
+    @Volatile
+    var lastCostMs: Float = 0f
+        private set
+
+    /** 投递一次采样，立即返回；上一次没做完就跳过，绝不堆积任务。 */
+    fun requestSample() {
+        if (!sampling.compareAndSet(false, true)) return
+        handler.post {
+            val t0 = System.nanoTime()
+            try {
+                cached = doSample()
+            } catch (_: Throwable) {
+                // 采样失败保留上一次结果，不能把异常带进渲染线程。
+            } finally {
+                lastCostMs = (System.nanoTime() - t0) / 1_000_000f
+                sampling.set(false)
+            }
+        }
+    }
+
+    fun latest(): SystemSample = cached
+
+    override fun close() {
+        worker.quitSafely()
+    }
 
     private val appContext = context.applicationContext
     private val battery = appContext.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
@@ -50,8 +92,10 @@ class SystemMeters(context: Context) {
     private var lastCpuTicks = 0L
     private var lastWallMs = 0L
     private var lastCpuPercent = 0f
+    private var cachedVoltageMv = -1
+    private var voltageQueries = 0
 
-    fun sample(): SystemSample {
+    private fun doSample(): SystemSample {
         val nowMs = SystemClock.elapsedRealtime()
         val ticks = readCpuTicks()
         if (lastWallMs != 0L && ticks >= lastCpuTicks && nowMs > lastWallMs) {
@@ -118,13 +162,17 @@ class SystemMeters(context: Context) {
         val currentUa = battery?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
             ?: return -1f
         if (currentUa == 0 || currentUa == Int.MIN_VALUE) return -1f
-        val voltageMv = try {
-            appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-                ?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
-        } catch (_: Throwable) {
-            -1
+        // 电压变化很慢，不值得每 0.5s 走一次同步 binder；每 10 次采样刷新一次。
+        if (cachedVoltageMv <= 0 || voltageQueries++ % 10 == 0) {
+            cachedVoltageMv = try {
+                appContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                    ?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1) ?: -1
+            } catch (_: Throwable) {
+                -1
+            }
         }
-        if (voltageMv <= 0) return -1f
-        return abs(currentUa.toFloat()) * voltageMv / 1_000_000f
+        val v = cachedVoltageMv
+        if (v <= 0) return -1f
+        return abs(currentUa.toFloat()) * v / 1_000_000f
     }
 }

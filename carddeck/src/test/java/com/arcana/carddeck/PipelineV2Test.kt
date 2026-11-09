@@ -1,11 +1,13 @@
 package com.arcana.carddeck
 
 import com.arcana.gfx.GpuStats
+import com.arcana.gfx.RenderMode
 import com.arcana.gfx.RenderPolicy
 import com.arcana.gfx.ShaderPasses
 import com.arcana.gfx.TileSpec
 import com.arcana.gfx.Tiles
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -101,6 +103,45 @@ class PipelineV2Test {
         assertEquals(2, spec.passes.size)
         assertEquals("cam", spec.source)
         assertEquals(emptyList<com.arcana.gfx.ShaderPass>(), TileSpec("cam", Tiles.full()).passes)
+    }
+
+    /* ---- 帧驱动门控：旧实现「先消费帧再门控」会吞帧 + 重复帧，这里锁住行为 ---- */
+
+    private fun draw(
+        pending: Boolean = false,
+        dirty: Boolean = false,
+        animating: Boolean = false,
+        intervalOk: Boolean = true,
+        mode: RenderMode = RenderMode.CONTINUOUS,
+        frameDriven: Boolean = true,
+    ) = RenderPolicy.shouldDraw(pending, dirty, animating, intervalOk, mode, frameDriven)
+
+    @Test
+    fun arrivingFrameIsDrawnEvenBeforeFpsInterval() {
+        // 帧到达本身就是节拍，不能被 maxFps 拖到下一个回调（否则新帧被覆盖）。
+        assertTrue(draw(pending = true, intervalOk = false))
+        assertTrue(draw(pending = true, intervalOk = false, mode = RenderMode.ON_DEMAND))
+    }
+
+    @Test
+    fun frameDrivenLayoutNeverRepeatsAFrame() {
+        // 修复前 142/297 次绘制没有新帧，重复贴上一帧 = 肉眼可见的顿挫。
+        assertFalse(draw(pending = false, intervalOk = true, frameDriven = true))
+        assertFalse(draw(pending = false, intervalOk = true, mode = RenderMode.ON_DEMAND))
+    }
+
+    @Test
+    fun proceduralLayoutStillDrawsAtFpsCap() {
+        // 没有外部帧源时仍由 maxFps 匀速驱动，别把 CPU 动态纹理也停掉。
+        assertTrue(draw(pending = false, intervalOk = true, frameDriven = false))
+        assertFalse(draw(pending = false, intervalOk = false, frameDriven = false))
+    }
+
+    @Test
+    fun dirtyAppliesImmediatelyButAnimationStillObeysFpsCap() {
+        assertTrue(draw(dirty = true, intervalOk = false))
+        assertFalse(draw(animating = true, intervalOk = false))
+        assertTrue(draw(animating = true, intervalOk = true))
     }
 
     private inline fun expectIllegalArgument(block: () -> Unit) {
