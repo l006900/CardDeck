@@ -3,7 +3,6 @@ package com.arcana.gfx
 import android.content.Context
 import android.graphics.PixelFormat
 import android.opengl.GLSurfaceView
-import com.arcana.gl.MsaaConfigChooser
 
 /**
  * 合成管线的 GL 宿主 View。

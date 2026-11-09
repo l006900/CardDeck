@@ -7,7 +7,6 @@ import android.opengl.Matrix
 import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
-import com.arcana.carddeck.TextureBank
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.min

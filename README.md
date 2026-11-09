@@ -13,7 +13,7 @@
 （`CardDeck` 默认自带深色底，设 `background = false` 即透明）。库不画文字、不认识「牌 / 塔罗 / 抽奖」，只认 id、贴图键和位姿。
 采集与录制是两个配合 `CompositeStage` 使用的类，不是独立控件。
 
-> 目录：[安装](#安装) · [快速上手](#快速上手) · [坐标与所有权约定](#坐标与所有权约定) · [API 速查](#api-速查) · [自定义 shader](#自定义-shader) · [帧调度与性能怎么量](#帧调度与性能怎么量) · [采集与录制](#采集与录制) · [视频源接入](#视频源接入不绑定解码器) · [排错](#排错) · [示例工程](#示例工程) · [边界](#边界)
+> 目录：[安装](#安装) · [两个 artifact](#两个-artifact按需选) · [快速上手](#快速上手) · [坐标与所有权约定](#坐标与所有权约定) · [API 速查](#api-速查) · [自定义 shader](#自定义-shader) · [帧调度与性能怎么量](#帧调度与性能怎么量) · [采集与录制](#采集与录制) · [视频源接入](#视频源接入不绑定解码器) · [排错](#排错) · [示例工程](#示例工程) · [边界](#边界)
 
 ---
 
@@ -37,6 +37,20 @@
 
 ---
 
+## 两个 artifact，按需选
+
+| 坐标 | 内容 | 什么时候用 |
+| --- | --- | --- |
+| `com.arcana:carddeck:0.5.0` | 全部：`CardDeck` / `SpriteStage` 牌桌控件 + `com.arcana.gfx` 合成层 | 要现成的牌堆 / 抽牌 / 翻面 UI |
+| `com.arcana:gfx:0.5.0` | 只有合成层：`CompositeSurfaceHost` / `GpuCompositor` / `Tiles` / `RenderPolicy` / `VideoRecorder` | 自己有渲染/控件，只要多路合成 |
+
+`carddeck` 用 `api` 依赖 `gfx`，所以**依赖 `carddeck` 的项目照样能直接用 `com.arcana.gfx.*`**，
+两者不需要重复声明。
+
+`gfx` 包内自带 `GlUtil` / `MsaaConfigChooser` / `TextureBank`，**不引用任何别的包**：
+如果你的项目里也有 `com.arcana.gl.*` 这类同名类，接进来不会有 duplicate class，也不会有
+「库的 shader 找宿主的 uniform」这种隐式耦合。
+
 ## 安装
 
 ### 环境要求
@@ -46,7 +60,7 @@
 | Android | `minSdk 24`，设备支持 OpenGL ES 2.0 |
 | UI | Jetpack Compose（以源码 module 接入时，`ui` / `foundation` 由库用 `api` 传递，不用重复声明） |
 | ABI | release 只打 `arm64-v8a`、`armeabi-v7a`；debug 额外带 `x86_64`（模拟器可跑） |
-| 源码构建 | 需要 NDK 27 与 CMake 3.22.1（版本写在 `carddeck/build.gradle.kts`）；Kotlin / AGP / Compose BOM 版本以 `gradle/libs.versions.toml` 为准 |
+| 源码构建 | 需要 NDK 27 与 CMake 3.22.1（版本写在 `gfx/build.gradle.kts`）；Kotlin / AGP / Compose BOM 版本以 `gradle/libs.versions.toml` 为准 |
 | 用已构建好的 AAR | 消费方不需要 NDK / CMake（只有从源码构建 AAR 时才需要） |
 
 **16 KB 页兼容**：库里的 `libarcana_frameclock.so`（两个 ABI）在 CMake 里用
@@ -56,55 +70,107 @@ Android 15+ 的 16 KB 内核可直接加载，可调试应用也不会再弹「�
 接入后若仍看到该警告，用 `llvm-readelf -l your.so` 检查**你自己的其它 .so**——
 系统会把 APK 里所有未对齐的库一起列出来（其中一项报「未知错误」也可能只是另一项未对齐的连带结果）。
 
-库自带 `maven-publish` 配置，坐标是 `com.arcana:carddeck:0.5.0`。三种接入方式按推荐顺序排列。
+库自带 `maven-publish` 配置。三种接入方式按推荐顺序排列。
 
 ### 方式 A：依赖坐标（推荐，一行搞定）
 
-库**尚未发布到 Maven Central / JitPack**，但可以直接构建到本地仓库消费：
-
-```bash
-# 构建并发布（AAR + sources.jar + POM，含传递依赖声明）
-./gradlew :carddeck:publishToMavenLocal    # → ~/.m2/repository/com/arcana/carddeck/
-# 或者只发到 build/repo，不污染本机 ~/.m2：
-./gradlew :carddeck:publish
-```
+**别人怎么用**（发布见下一节；JitPack 首次拉取会现编一次，之后是缓存好的 AAR）：
 
 ```kotlin
-// settings.gradle.kts —— 用 build/repo 时加一行；用 mavenLocal() 则无需改这里
+// settings.gradle.kts —— 加一次，全项目可用
 dependencyResolutionManagement {
     repositories {
-        mavenLocal()                              // 方式 1
-        maven { url = uri("../CardDeck/carddeck/build/repo") }   // 方式 2
+        google()
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.arcana:carddeck:0.5.0")
+    implementation("com.github.l006900.CardDeck:gfx:0.5.0")         // 只要合成层
+    // implementation("com.github.l006900.CardDeck:carddeck:0.5.0")  // 连牌桌控件一起
 }
 ```
 
-**上面这一行就够了**：`ui` / `foundation` / Compose BOM / lifecycle 都由库用 `api` 传递，
+多模块仓库的坐标规则是 `com.github.<user>.<repo>:<artifactId>:<tag>`，
+所以 `:gfx` 模块的 artifactId 就是 `gfx`（写在 `gfx/build.gradle.kts` 的 `publication` 里）。
+
+**本机怎么发**（自己调试用，别人用不到这一步）：
+
+```bash
+./gradlew :gfx:publishToMavenLocal    # → ~/.m2/repository/com/arcana/gfx/
+./gradlew :carddeck:publishToMavenLocal
+```
+
+**上面这一行依赖就够了**：`ui` / `foundation` / Compose BOM / lifecycle 都由库用 `api` 传递，
 R8 保留规则随 AAR 自动合并，`libarcana_frameclock.so`（两个 ABI）在最终 APK 打包时自动并入。
-这条路径已用独立 module 实测：只写这一行依赖 → 编译通过 → APK 内出现 native 库。
 消费方**不需要 NDK / CMake**，也不需要抄 `libs.versions.toml`。
+这条路径已在两个独立工程实测（其中一个宿主自己就有 `com.arcana.gl.*` 全套引擎）：
+只写一行依赖 → 编译通过、无 duplicate class → APK 内出现 native 库 → 真机 45 fps 跑通合成。
 
-要发到自己的私有 Maven（Nexus / Artifactory / GitHub Packages），在 `carddeck/build.gradle.kts`
-的 `publishing.repositories` 里换成你的地址即可，`publication` 部分不用动。
+> `0.x` 阶段建议锁精确版本（`gfx:0.5.0`），别写 `0.+`：MINOR 位可能带公开 API 变更。
 
-> `0.x` 阶段建议锁精确版本（`carddeck:0.5.0`），别写 `0.+`：MINOR 位可能带签名变更。
+## 发布到 JitPack
+
+三步，之后别人就能用上面那行坐标：
+
+```bash
+git add -A && git commit -m "release 0.5.0" && git push
+git tag 0.5.0 && git push origin 0.5.0
+# 打开 https://jitpack.io/#l006900/CardDeck → Look up → 选 0.5.0 → Get it
+```
+
+**tag 名不要带 `v`**：JitPack 拿 tag 名当版本号，坐标里的 `0.5.0` 才和 POM 的 `version = "0.5.0"` 对齐。
+
+`jitpack.yml` 已经处理好三个容易翻车的点：
+
+- 只装 `:gfx` 与 `:carddeck`，不碰 `:app`（demo 不发布）；
+- `sdkmanager` 先装 **NDK 27.0.12077973 + CMake 3.22.1** —— gfx 那 320 行 C++ 要它们，JitPack 镜像默认没有这组版本；
+- `openjdk17`（AGP 9 的最低要求）+ `--no-daemon`。
+
+构建完成后自检：
+
+```bash
+curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.5.0/gfx-0.5.0.aar | head -1
+# HTTP/1.1 200 OK 就说明 AAR 已生成，全世界都能解析
+```
+
+> **前提：仓库必须是 public。** JitPack 只能读公开仓库，私有仓库要走它的付费计划。
+
+### Maven Central（要「别人零配置」只有这条）
+
+好处是消费方连 `maven { url }` 都不用加 —— `mavenCentral()` 默认就在仓库列表里。
+代价是首次发布要人工几步：
+
+1. Group 必须换：`com.arcana` 需要证明拥有 `arcana.com` 域名，一般用
+   `io.github.l006900`（GitHub 用户名即可验证）。坐标会变成 `io.github.l006900:gfx:0.5.0`。
+2. [central.sonatype.com](https://central.sonatype.com) 注册命名空间 → 验证。
+3. 生成 GPG 密钥并配置 `signing` 插件（AAR 也要签）。
+4. `./gradlew publishToMavenCentral`（或上传 zip bundle），审核通过后全世界可解析。
+
+`publishing` 里的 `pom`、`withSourcesJar()`、`consumerProguardFiles` 已经按 Central 要求备好，
+差的只有 group 改名、签名和账号凭据三样。
+
+### 私有 Maven（Nexus / Artifactory / GitHub Packages）
+
+在 `gfx/build.gradle.kts` 与 `carddeck/build.gradle.kts` 的 `publishing.repositories` 里换成你的地址即可，
+`publication` 部分不用动。GitHub Packages 的坐标是 `https://maven.pkg.github.com/<user>/<repo>`，
+消费方需要带 token 的 `credentials {}`。
 
 ### 方式 B：源码 module（要改库本身时用）
 
-把 `carddeck/` 整个模块复制进你的工程：
+把 `carddeck/` 与 `gfx/` 两个模块一起复制进你的工程：
 
 ```kotlin
 // settings.gradle.kts
 include(":carddeck")
+include(":gfx")
 
 // app/build.gradle.kts
 dependencies {
-    implementation(project(":carddeck"))
+    implementation(project(":carddeck"))   // 会通过 api 带上 :gfx
+    // 只要合成层：implementation(project(":gfx"))
 }
 ```
 
@@ -113,13 +179,16 @@ dependencies {
 ### 方式 C：AAR 文件
 
 ```bash
-./gradlew :carddeck:assembleRelease
-# 产物：carddeck/build/outputs/aar/carddeck-release.aar（内含 jni/<abi>/libarcana_frameclock.so）
+./gradlew :carddeck:assembleRelease :gfx:assembleRelease
+# 产物：gfx/build/outputs/aar/gfx-release.aar
+#       carddeck/build/outputs/aar/carddeck-release.aar
+# 两者都内含 jni/<abi>/libarcana_frameclock.so（carddeck 通过 api 依赖 gfx，但 AAR 不会内嵌）
 ```
 
 ```kotlin
 // app/build.gradle.kts
 dependencies {
+    implementation(files("libs/gfx-release.aar"))         // 必须先加，carddeck 依赖它
     implementation(files("libs/carddeck-release.aar"))
     // AAR 不带 pom，依赖不会传递，下面这些要自己声明：
     implementation(platform(libs.androidx.compose.bom))
@@ -696,7 +765,7 @@ recorder.close()
 五个页面全部只依赖系统 API（MediaPlayer / MediaCodec / Camera2），不要求预编任何第三方库。
 
 ```bash
-./gradlew :app:assembleDebug :carddeck:testDebugUnitTest
+./gradlew :app:assembleDebug :gfx:testDebugUnitTest :carddeck:testDebugUnitTest
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.arcana.carddeck/.MainActivity
 ```
