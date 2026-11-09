@@ -29,4 +29,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "CardDeck"
 include(":app")
+include(":carddeck")
  
