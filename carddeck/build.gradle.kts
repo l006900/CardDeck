@@ -1,7 +1,13 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.compose)
+    `maven-publish`
 }
+
+// 发布坐标。拆分模块时 artifactId 会变（如 arcana-gfx-core），但 group 与
+// 依赖方的写法保持不变，消费方无需改 build 文件。
+group = "com.arcana"
+version = "0.5.0"
 
 android {
     namespace = "com.arcana.carddeck.lib"
@@ -17,8 +23,18 @@ android {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
         ndk {
+            // 发布产物只带真机 ABI，控制 AAR 体积。
             abiFilters += "arm64-v8a"
             abiFilters += "armeabi-v7a"
+        }
+    }
+
+    buildTypes {
+        debug {
+            // 开发期补上 x86_64，让模拟器也能跑（不进 release AAR）。
+            ndk {
+                abiFilters += "x86_64"
+            }
         }
     }
 
@@ -37,6 +53,13 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // maven-publish 需要显式声明发布哪个变体，并附带源码 jar。
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 dependencies {
@@ -49,4 +72,37 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     testImplementation(libs.junit)
+}
+
+publishing {
+    publications {
+        register<MavenPublication>("release") {
+            afterEvaluate { from(components["release"]) }
+            artifactId = "carddeck"
+
+            pom {
+                name.set("CardDeck")
+                description.set(
+                    "Compose-native GPU rendering for Android: scene graph, multi-source " +
+                        "compositing (FBO tiling, per-tile shader chains), MediaCodec recording, " +
+                        "and a frame-clock driven render policy. No third-party decoder required.",
+                )
+                url.set("https://github.com/arcana/carddeck")
+                licenses {
+                    license {
+                        name.set("The Apache License, Version 2.0")
+                        url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                    }
+                }
+            }
+        }
+    }
+    // 默认发到 build/repo；同时支持 publishReleasePublicationToMavenLocal 供本机消费方验证。
+    repositories {
+        mavenLocal()
+        maven {
+            name = "localBuild"
+            url = uri(layout.buildDirectory.dir("repo"))
+        }
+    }
 }

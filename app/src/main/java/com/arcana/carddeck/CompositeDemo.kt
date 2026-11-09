@@ -6,6 +6,7 @@ import android.os.Looper
 import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -248,12 +249,25 @@ fun CompositeDemo() {
         maxTextureBytes = budgetMb.toLong() * 1_048_576L,
     )
 
-    Column(
+    // 控制区**固定**占 55% 屏高 + 内部可滚动：固定高度是刻意的——若用 heightIn(max=)，
+    // 内容高度一变预览区就跟着变，触发 onSurfaceChanged → 重画 → 指标刷新 → 又变，
+    // 把按需渲染打成永久空转（文件顶部 HudLine 的注释讲的是同一个自激循环）。
+    // 之前 10 个特效 + 6 个布局按钮直接堆在 Column 里，把 GLSurfaceView 挤成 0 高度
+    // （uiautomator 实测 bounds=[0,0][0,0]），整页 0 fps / 0 draws / 一片空白。
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Brush.verticalGradient(listOf(Color(0xFF0B1030), Color(0xFF141026), Color(0xFF070A14)))),
     ) {
-        Column(modifier = Modifier.padding(top = 20.dp, start = 16.dp, end = 16.dp)) {
+    val controlsHeight = maxHeight * 0.64f
+    Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(controlsHeight)
+                .verticalScroll(rememberScrollState())
+                .padding(top = 10.dp, start = 16.dp, end = 16.dp),
+        ) {
             Text(
                 "GPU 合成管线 · 多画面", color = Color(0xFFE9D7A6),
                 fontSize = 20.sp, fontWeight = FontWeight.SemiBold,
@@ -334,6 +348,7 @@ fun CompositeDemo() {
                 onError = { notice = it },
             )
         }
+    }
     }
 }
 

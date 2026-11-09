@@ -102,15 +102,16 @@ interface FrameSource {
  * [frameSink] 是**生产者侧**钩子：帧到达时在回调线程触发，用来把时间戳推进
  * [FrameTiming] 的无锁队列；GL 线程在 [update] 里做消费者侧 drain。
  *
- * @param onSurfaceReady GL 线程回调，拿到 Surface 后请切回自己的线程再交给播放器。
  * @param bufferWidth / bufferHeight 非零时给 SurfaceTexture 设默认缓冲尺寸。
  *   Camera2 这类**主动推流**的生产者必须设，否则预览会按 1×1 的缺省尺寸出图。
+ * @param onSurfaceReady GL 线程回调，拿到 Surface 后请切回自己的线程再交给播放器。
+ *   **放在最后**是为了支持尾随 lambda 写法：`ExternalTextureSource("video") { surface -> }`。
  */
 class ExternalTextureSource(
     name: String = "video",
-    private val onSurfaceReady: ((Surface) -> Unit)? = null,
     private val bufferWidth: Int = 0,
     private val bufferHeight: Int = 0,
+    private val onSurfaceReady: ((Surface) -> Unit)? = null,
 ) : FrameSource {
 
     override val external: Boolean = true

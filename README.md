@@ -45,7 +45,7 @@
 | --- | --- |
 | Android | `minSdk 24`，设备支持 OpenGL ES 2.0 |
 | UI | Jetpack Compose（以源码 module 接入时，`ui` / `foundation` 由库用 `api` 传递，不用重复声明） |
-| ABI | 默认只打 `arm64-v8a`、`armeabi-v7a` |
+| ABI | release 只打 `arm64-v8a`、`armeabi-v7a`；debug 额外带 `x86_64`（模拟器可跑） |
 | 源码构建 | 需要 NDK 27 与 CMake 3.22.1（版本写在 `carddeck/build.gradle.kts`）；Kotlin / AGP / Compose BOM 版本以 `gradle/libs.versions.toml` 为准 |
 | 用已构建好的 AAR | 消费方不需要 NDK / CMake（只有从源码构建 AAR 时才需要） |
 
@@ -56,9 +56,45 @@ Android 15+ 的 16 KB 内核可直接加载，可调试应用也不会再弹「�
 接入后若仍看到该警告，用 `llvm-readelf -l your.so` 检查**你自己的其它 .so**——
 系统会把 APK 里所有未对齐的库一起列出来（其中一项报「未知错误」也可能只是另一项未对齐的连带结果）。
 
-库**目前没有发布到 Maven Central / JitPack**，用下面两种方式之一接入。
+库自带 `maven-publish` 配置，坐标是 `com.arcana:carddeck:0.5.0`。三种接入方式按推荐顺序排列。
 
-### 方式 A：源码 module（推荐，依赖可传递）
+### 方式 A：依赖坐标（推荐，一行搞定）
+
+库**尚未发布到 Maven Central / JitPack**，但可以直接构建到本地仓库消费：
+
+```bash
+# 构建并发布（AAR + sources.jar + POM，含传递依赖声明）
+./gradlew :carddeck:publishToMavenLocal    # → ~/.m2/repository/com/arcana/carddeck/
+# 或者只发到 build/repo，不污染本机 ~/.m2：
+./gradlew :carddeck:publish
+```
+
+```kotlin
+// settings.gradle.kts —— 用 build/repo 时加一行；用 mavenLocal() 则无需改这里
+dependencyResolutionManagement {
+    repositories {
+        mavenLocal()                              // 方式 1
+        maven { url = uri("../CardDeck/carddeck/build/repo") }   // 方式 2
+    }
+}
+
+// app/build.gradle.kts
+dependencies {
+    implementation("com.arcana:carddeck:0.5.0")
+}
+```
+
+**上面这一行就够了**：`ui` / `foundation` / Compose BOM / lifecycle 都由库用 `api` 传递，
+R8 保留规则随 AAR 自动合并，`libarcana_frameclock.so`（两个 ABI）在最终 APK 打包时自动并入。
+这条路径已用独立 module 实测：只写这一行依赖 → 编译通过 → APK 内出现 native 库。
+消费方**不需要 NDK / CMake**，也不需要抄 `libs.versions.toml`。
+
+要发到自己的私有 Maven（Nexus / Artifactory / GitHub Packages），在 `carddeck/build.gradle.kts`
+的 `publishing.repositories` 里换成你的地址即可，`publication` 部分不用动。
+
+> `0.x` 阶段建议锁精确版本（`carddeck:0.5.0`），别写 `0.+`：MINOR 位可能带签名变更。
+
+### 方式 B：源码 module（要改库本身时用）
 
 把 `carddeck/` 整个模块复制进你的工程：
 
@@ -74,7 +110,7 @@ dependencies {
 
 同时把本仓库的 `gradle/libs.versions.toml` 与 `build.gradle.kts` 里的插件别名对齐，或改成你自己的版本号直接写依赖。
 
-### 方式 B：AAR
+### 方式 C：AAR 文件
 
 ```bash
 ./gradlew :carddeck:assembleRelease
@@ -115,8 +151,9 @@ GPU 计时用的是 JNI 静态注册，native 符号名写死成 `Java_com_arcan
 
 只有当你**手工集成 AAR**（不走 Gradle 依赖、自己写 proguard 配置）时，才需要手动把这一行加进去。
 
-**2. x86 模拟器**：默认 ABI 不含 x86。要在模拟器上跑，在 `carddeck/build.gradle.kts` 的
-`ndk.abiFilters` 里加 `"x86_64"` 后重新构建。
+**2. x86 模拟器**：**debug 变体已带 `x86_64`**，在模拟器上直接能跑；只有
+**release AAR 刻意只打 `arm64-v8a` + `armeabi-v7a`**（控制发布体积）。如果你的正式包需要
+x86 平板 / ChromeOS，在 `carddeck/build.gradle.kts` 的 `defaultConfig.ndk.abiFilters` 里补 `"x86_64"`。
 
 ---
 
@@ -232,8 +269,9 @@ fun FourUp(videoPath: String) {
     }
 
     Column {
-        // 必须固定高度：见下面「HUD 的三个前提」
-        Text(
+        // 必须固定高度：见下面「HUD 的三个前提」。
+        // 用 BasicText（compose foundation，随库传递）；想要 Material 的 Text 请自行加 material3。
+        BasicText(
             stats.summary(), maxLines = 1, softWrap = false,
             modifier = Modifier.fillMaxWidth().height(18.dp),
         )
