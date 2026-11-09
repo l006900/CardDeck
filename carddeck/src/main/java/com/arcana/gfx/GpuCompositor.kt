@@ -89,6 +89,11 @@ class GpuCompositor : GLSurfaceView.Renderer {
     private val targets = TargetPair()
     /** 每路画面独有的 ping-pong 目标，按 tile 下标复用，布局切换时才重建。 */
     private val tilePairs = ArrayList<TargetPair>()
+    /**
+     * 双输入 pass（混合 / 转场）的第二路输入缓冲：先把 [ShaderPass.secondarySource]
+     * 那一路源 blit 成 2D 纹理，再绑给 `uTexture2`。这样 2D / 摄像头 / 视频源都能混。
+     */
+    private val secondaryScratch = TargetPair()
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // 离屏合成尺寸 = 屏幕尺寸 × 实际生效的缩放；输出到屏幕时线性上采样。
@@ -544,6 +549,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
         val program: Int,
         val pos: Int, val uv: Int,
         val texture: Int, val texel: Int, val params: Int, val time: Int,
+        val texture2: Int,
     )
 
     private fun compileBlit(fragment: String): BlitProgram {
@@ -565,6 +571,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
             GlUtil.attrib(p, "aPos"), GlUtil.attrib(p, "aUv"),
             GlUtil.location(p, "uTexture"), GlUtil.location(p, "uTexel"),
             GlUtil.location(p, "uParams"), GlUtil.location(p, "uTime"),
+            GlUtil.location(p, "uTexture2"),
         )
         remember(prog.pos, prog.uv)
         return prog
@@ -701,6 +708,38 @@ class GpuCompositor : GLSurfaceView.Renderer {
         GLES20.glUniform2f(program.texel, texelX, texelY)
         GLES20.glUniform4fv(program.params, 1, pass.params, 0)
         GLES20.glUniform1f(program.time, timeSec)
+
+        // 双输入：把第二路源先 blit 进 scratch（2D 或 OES 都先转成 2D），再绑给 uTexture2。
+        if (program.texture2 >= 0 && pass.secondarySource != null) {
+            val sec = sources[pass.secondarySource]
+            val secTex = sec?.textureId() ?: 0
+            if (sec != null && secTex > 0) {
+                sec.update()
+                val sw = pair.read.width.coerceAtLeast(2)
+                val sh = pair.read.height.coerceAtLeast(2)
+                secondaryScratch.ensure(sw, sh)
+                secondaryScratch.reset()
+                secondaryScratch.write.bind()
+                GLES20.glClearColor(0f, 0f, 0f, 0f)
+                GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+                GLES20.glDisable(GLES20.GL_BLEND)
+                val secProg = if (sec.external) blitOes else blit2D
+                if (secProg != null) {
+                    blitSource(
+                        secProg,
+                        sec,
+                        TileSpec(source = pass.secondarySource, tile = Tile(0f, 0f, 1f, 1f)),
+                        intArrayOf(0, 0, sw, sh),
+                    )
+                }
+                secondaryScratch.swap()
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE1)
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, secondaryScratch.read.texture)
+                GLES20.glUniform1i(program.texture2, 1)
+                GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
+            }
+        }
+
         drawQuad(program.pos, program.uv)
         pair.swap()
     }

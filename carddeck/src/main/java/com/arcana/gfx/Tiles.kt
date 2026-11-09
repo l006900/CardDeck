@@ -90,4 +90,53 @@ object Tiles {
         full(gap),
         Tile(1f - smallW - gap * 2, 1f - smallH - gap * 2, smallW, smallH),
     )
+
+    /**
+     * 焦点布局：第 0 路占左侧大画面，其余各路在右侧竖向堆叠成缩略图条。
+     * 适合「主画面 + 多路预览」的监控 / 导播场景。
+     */
+    fun focus(count: Int, bigFrac: Float = 0.66f, gap: Float = 0.012f): List<Tile> {
+        require(count > 0)
+        if (count == 1) return listOf(full(gap))
+        val g = gap
+        val leftW = (1f - 3f * g) * bigFrac
+        val leftH = 1f - 2f * g
+        val tiles = ArrayList<Tile>(count)
+        tiles.add(Tile(g, g, leftW, leftH))
+        val rightX = g + leftW + g
+        val rightW = 1f - 2f * g - leftW - g
+        val n = count - 1
+        val rh = (leftH - (n - 1) * g) / n
+        for (i in 0 until n) {
+            val y = g + i * (rh + g)
+            tiles.add(Tile(rightX, y, rightW, rh))
+        }
+        return tiles
+    }
+
+    /**
+     * 侧栏布局：第 0 路占右侧大画面，其余各路在左侧竖向堆叠成缩略图栏。
+     * 与 [focus] 左右镜像，适合把控制/列表放左侧、主视图放右侧的界面。
+     */
+    fun sidebar(count: Int, sideFrac: Float = 0.28f, gap: Float = 0.012f): List<Tile> {
+        require(count > 0)
+        if (count == 1) return listOf(full(gap))
+        val g = gap
+        val sideW = (1f - 3f * g) * sideFrac
+        val mainX = g + sideW + g
+        val mainW = 1f - 2f * g - sideW - g
+        val mainH = 1f - 2f * g
+        val tiles = ArrayList<Tile>(count)
+        tiles.add(Tile(mainX, g, mainW, mainH))
+        val n = count - 1
+        val th = (1f - 2f * g - (n - 1) * g) / n
+        for (i in 0 until n) {
+            val y = g + i * (th + g)
+            tiles.add(Tile(g, y, sideW, th))
+        }
+        return tiles
+    }
+
+    /** 直接用调用方给定的瓦片列表（自定义拼接形状）。 */
+    fun custom(tiles: List<Tile>): List<Tile> = tiles
 }

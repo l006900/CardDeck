@@ -24,12 +24,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * CardDeck 库的验证 sample：三个页面分别验证
+ * CardDeck 库的验证 sample：五个页面分别验证
  * 1) 高层扇形牌堆控件 [CardDeck]；
  * 2) 低层通用场景图 [SpriteStage]（布局 / 翻面 / 光晕 / 粒子 / 拖动）；
  * 3) 200 张卡同屏对跑的性能对比（Compose 原生 vs OpenGL 场景图）；
  * 4) [CompositeDemo]：GPU 合成管线（视频渲染 / 多画面拼接 / shader 链 / 帧调度 / 实测指标）；
  * 5) [CaptureDemo]：Camera2 采集 → 合成 → MediaCodec 编码 MP4 → MediaPlayer 回放闭环。
+ *
+ * 所有视频源都走系统 MediaCodec + SurfaceTexture（[ExternalTextureSource]），
+ * 库本体不依赖任何第三方解码器。
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,6 +66,7 @@ fun SampleRoot() {
             1 -> SceneDemo()
             2 -> PerfDemo()
             3 -> CompositeDemo()
+            4 -> CaptureDemo()
             else -> CaptureDemo()
         }
     }

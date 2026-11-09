@@ -13,7 +13,7 @@
 （`CardDeck` 默认自带深色底，设 `background = false` 即透明）。库不画文字、不认识「牌 / 塔罗 / 抽奖」，只认 id、贴图键和位姿。
 采集与录制是两个配合 `CompositeStage` 使用的类，不是独立控件。
 
-> 目录：[安装](#安装) · [快速上手](#快速上手) · [坐标与所有权约定](#坐标与所有权约定) · [API 速查](#api-速查) · [自定义 shader](#自定义-shader) · [帧调度与性能怎么量](#帧调度与性能怎么量) · [采集与录制](#采集与录制) · [排错](#排错) · [示例工程](#示例工程) · [边界](#边界)
+> 目录：[安装](#安装) · [快速上手](#快速上手) · [坐标与所有权约定](#坐标与所有权约定) · [API 速查](#api-速查) · [自定义 shader](#自定义-shader) · [帧调度与性能怎么量](#帧调度与性能怎么量) · [采集与录制](#采集与录制) · [视频源接入](#视频源接入不绑定解码器) · [排错](#排错) · [示例工程](#示例工程) · [边界](#边界)
 
 ---
 
@@ -316,9 +316,15 @@ fun FourUp(videoPath: String) {
 | `GpuTimer` | C++ 侧 `GL_EXT_disjoint_timer_query`；`supported` / `pollMs()`，设备不支持时返回 -1 |
 | `SystemMeters(context)` | `sample()` → `SystemSample`（进程 CPU%、PSS/native/graphics、整机功率） |
 
-内置预设：`grayscale()`、`colorGrade(brightness, contrast, saturation, warmth)`、
+内置预设：单输入滤镜 `grayscale()`、`colorGrade(brightness, contrast, saturation, warmth)`、
 `blur(radiusPx)`（返回横竖两个 pass）、`sobel(strength)`、`chromaShift(offsetPx)`、
-`vignette(amount, scanlines)`、`beauty()`、`glitch()`、`custom(name, fragment, ...)`。
+`vignette(amount, scanlines)`、`invert()`、`sepia(tint)`、`posterize(levels)`、`pixelate(cellPx)`、
+`sharpen(amount)`、`emboss(amount)`、`duotone(hueShift)`、`hueRotate(deg)`、`gamma(g)`、
+`nightVision(grain)`、`oldFilm(strength)`、`kaleidoscope(segments)`、`lensDistort(strength)`；
+组合链 `beauty()`、`glitch()`、`cinematic()`、`retro()`、`cyberpunk()`、`dream()`；
+**双输入** `blend(secondaryKey, amount, mode)`（正片叠底/滤色/叠加/相加/差值）、
+`crossfade(secondaryKey, durationSec)`（循环转场）；
+`custom(name, fragment, p0..p3, secondarySource = ...)`。
 
 ---
 
@@ -360,6 +366,31 @@ compositor.passes = listOf(ripple)
 规则：`ShaderPass` 构造时会校验源码里出现 `uTexture` 与 `gl_FragColor`、`params` 长度为 4，
 不满足直接抛异常；GLSL 本身写错则不会崩 GL 线程，只回调 `onError`。
 相同源码只编译一次并缓存 program。`enabled = false` 的 pass 会被跳过但留在链里，方便做 A/B 对比。
+
+### 双输入：混合 / 转场（两路源合成）
+
+把 `ShaderPass.secondarySource` 设成另一个**已注册源**的 key，合成器会先把那一路源
+（2D / 摄像头 / 视频都行，OES 源会先 blit 成 2D 再喂入）渲染进一块 scratch FBO，
+再绑给可选的 `sampler2D uTexture2`。于是 shader 能同时拿到本路结果（`uTexture`）与
+另一路（`uTexture2`），做混合或转场，不需要调用方自己管理第二张纹理。
+
+```kotlin
+// 本路（视频）与已注册的 "proc" 程序化源做叠加混合（mode=2 叠加，amount=0.5）
+compositor.passes = listOf(ShaderPasses.blend("proc", amount = 0.5f, mode = 2))
+// 或循环转场：A（本路）→ B（proc）→ A，每 durationSec 秒一个完整周期
+compositor.passes = listOf(ShaderPasses.crossfade("proc", durationSec = 4f))
+compositor.animating = true   // 转场依赖 uTime，必须开
+```
+
+`blend` 的 `uParams = (amount, 0, mode, 0)`，`crossfade` 的 `uParams = (0, durationSec, 0, 0)`，
+进度由 `uTime` 推导，不占 `uParams` 自由度。自定义双输入 pass 也要在 fragment 里声明
+`uniform sampler2D uTexture2;`，否则构造时抛异常。
+
+### 多画面布局
+
+`Tiles` 提供 `grid(count, columns)`、`columns(count)`、`pictureInPicture()`、`focus(count)`（1 大 + N 缩略）、
+`sidebar(count)`（主图 + 侧栏缩略）、`full()` 以及 `custom(tiles)`。所有布局返回归一化 `Tile` 列表，
+与 `compositor.tiles` 一一对应；切换布局时只需替换 `tiles`，合成器会按新的几何重排各路源。
 
 ---
 
@@ -434,7 +465,7 @@ fps 节流或内容门控跳过，**没有下一次补偿**，该帧就永久丢
 真机上曾出现 `draw=30/s` 却每一帧画面都和上一帧完全相同。正确做法有两层：
 
 1. 画完读回合成结果的一整行像素算指纹，与上一帧比对，`dup` 必须为 0；
-2. **最终裁判是「录屏 + 逐帧像素差」**（`adb shell screenrecord` → `ffmpeg` 解码成灰度帧 →
+2. **最终裁判是「录屏 + 逐帧像素差」**（`adb shell screenrecord` → 抽成灰度帧 →
    相邻帧 MAD）。它看的是**屏幕真正显示了什么**，而不是 renderer 以为自己画了什么。
    上面那个 30fps 卡帧就是靠它才定位到：renderer 每秒确实合成 30 帧、间隔 33ms 稳定，
    但屏幕上呈现的是 `动 动 停 停` —— 问题根本不在合成节拍，而在 swap 出来的是哪块缓冲。
@@ -570,6 +601,28 @@ recorder.close()
 
 ---
 
+## 视频源接入：不绑定解码器
+
+库核心**不依赖任何第三方解码器**，也不包含 FFmpeg / GStreamer / ExoPlayer。想 `git clone`
+下来直接 `./gradlew :app:installDebug` 就能看效果，这是刻意守住的边界。
+
+视频画面统一通过 `FrameSource` 接口接入，库只认**纹理**，不认**容器格式**：
+
+| 实现 | 适用 | demo 里的用法 |
+| --- | --- | --- |
+| `ExternalTextureSource` | 任何能给出 `Surface` 的播放器 | `MediaPlayer` + 系统 `MediaCodec` 解 H.264/MP4，落成 `GL_TEXTURE_EXTERNAL_OES` |
+| `CameraFrameSource` | Camera2 实时预览 | 采集页的实时摄像头画面 |
+| `DynamicTexture2DSource` | 自己上传的 RGBA 数据 | 程序化纹理、软解帧、AI 生成帧 |
+
+三者进 `GpuCompositor` 后走同一条路：多画面拼接 → 每路独立 shader 链 → 全局后处理 → 录屏。
+
+需要 FFmpeg 独有能力时（mkv/flv/ts 容器、rtmp 拉流、非常规编码），**自己实现一个 `FrameSource`**
+接进来即可——把解出的帧送进一个 `SurfaceTexture`，或直接上传 2D 纹理。库不绑定具体解码实现，
+也不替你做许可选择；这只影响你自己那个实现，不影响库本身的依赖图。
+
+
+---
+
 ## 排错
 
 | 现象 | 原因 / 处理 |
@@ -602,6 +655,7 @@ recorder.close()
 
 `app/` 模块有五个可运行页面：扇形牌堆、场景图、性能对比、GPU 合成、采集·编码·回放。
 最后一页需要动态申请 `CAMERA` 权限，走的是「Camera2 → 双画面合成 → H.264/MP4 → MediaPlayer 回灌」闭环。
+五个页面全部只依赖系统 API（MediaPlayer / MediaCodec / Camera2），不要求预编任何第三方库。
 
 ```bash
 ./gradlew :app:assembleDebug :carddeck:testDebugUnitTest
@@ -616,7 +670,8 @@ adb shell am start -n com.arcana.carddeck/.MainActivity
 库负责「画面从哪来、怎么合成、到哪去」：`Surface`（视频 / 摄像头）进、FBO 拼接与
 shader 链、`MediaCodec` input surface 出 MP4，整条 GPU 链零 CPU 回读；指标全部实测可量。
 
-它**不提供**解码器、播放器、音轨、音画同步、seek、文字渲染或跨平台后端。
-FFmpeg / GStreamer / ExoPlayer 的解码结果仍通过 `ExternalTextureSource` 的 `Surface`
-契约接进来；`MediaPlayer` / Camera2 由调用方自己管理生命周期。要的是一条能验证的
-GPU 渲染链，不是一个包办一切的多媒体框架。
+它**不提供**解封装器、解码器、播放器 UI、音轨混流、音画同步、seek、文字渲染或跨平台后端。
+视频源通过 `FrameSource` 接口接入（可选 `Surface` / `Camera2` / 自上传纹理三种实现），
+解码与容器格式完全由调用方决定——demo 走系统 `MediaCodec`，你要接 ExoPlayer 或自研 FFmpeg
+也只是多写一个 `FrameSource`，不动库本体。要的是一条能验证的 GPU 渲染链，
+不是一个包办一切的多媒体框架。

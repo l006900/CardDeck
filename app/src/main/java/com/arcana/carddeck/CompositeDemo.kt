@@ -58,8 +58,8 @@ import kotlinx.coroutines.withContext
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-private val LAYOUT_NAMES = listOf("2×2 宫格", "画中画", "三列", "全屏")
-private val CHAIN_NAMES = listOf("全局:无", "调色", "故障", "自定义 GLSL")
+private val LAYOUT_NAMES = listOf("2×2 宫格", "画中画", "三列", "全屏", "焦点", "侧栏")
+private val EFFECT_NAMES = listOf("全局:无", "调色", "故障", "自定义GLSL", "电影感", "复古", "赛博朋克", "梦境", "混合", "转场")
 
 /** 四路各取源画面的不同 uv 区域 —— 拼接 / 局部放大的直观演示。 */
 private val CROPS = listOf(
@@ -111,7 +111,7 @@ fun CompositeDemo() {
     var lastStatsAt by remember { mutableLongStateOf(0L) }
     var idle by remember { mutableStateOf(false) }
     var layoutIndex by remember { mutableIntStateOf(0) }
-    var chainIndex by remember { mutableIntStateOf(1) }
+    var effectMode by remember { mutableIntStateOf(1) }
     var fpsCap by remember { mutableIntStateOf(30) }
     var useVideo by remember { mutableStateOf(true) }
     var scale by remember { mutableFloatStateOf(1f) }
@@ -199,6 +199,9 @@ fun CompositeDemo() {
             0 -> Tiles.grid(4, columns = 2)
             1 -> Tiles.pictureInPicture()
             2 -> Tiles.columns(3)
+            3 -> listOf(Tiles.full(0.02f))
+            4 -> Tiles.focus(4)
+            5 -> Tiles.sidebar(4)
             else -> listOf(Tiles.full(0.02f))
         }
         // 每一路画面套**不同**的 shader 链：这就是「画面合成 / 特效模块」的真实形态。
@@ -218,18 +221,25 @@ fun CompositeDemo() {
         }
     }
 
-    LaunchedEffect(chainIndex, sourceKey) {
-        compositor.passes = when (chainIndex) {
+    LaunchedEffect(effectMode, sourceKey) {
+        // 全局后处理链：单输入滤镜、双输入混合/转场都走同一份 compositor.passes。
+        // 「混合 / 转场」的第二路输入是已注册的 "proc" 程序化源（竖条+圆环动画图案）。
+        compositor.passes = when (effectMode) {
             0 -> emptyList()
             1 -> listOf(ShaderPasses.colorGrade())
             2 -> listOf(ShaderPasses.chromaShift(5f), ShaderPasses.vignette(0.45f, 0.3f))
-            else -> listOf(ShaderPasses.custom("ripple", CUSTOM_GLSL))
+            3 -> listOf(ShaderPasses.custom("ripple", CUSTOM_GLSL))
+            4 -> ShaderPasses.cinematic()
+            5 -> ShaderPasses.retro()
+            6 -> ShaderPasses.cyberpunk()
+            7 -> ShaderPasses.dream()
+            8 -> listOf(ShaderPasses.blend("proc", 0.5f, 2))
+            9 -> listOf(ShaderPasses.crossfade("proc", 4f))
+            else -> emptyList()
         }
-        // animating 只表示「内容依赖 uTime，必须连续推进」——目前只有 ripple 那条自定义 GLSL。
+        // animating 只表示「内容依赖 uTime，必须连续推进」：自定义 GLSL 涟漪、循环转场都靠它。
         // CPU 程序化纹理源不用它：DynamicTexture2DSource.selfAnimating 自己会报「在产帧」。
-        // 早先这里写成 chainIndex >= 2 || sourceKey == "proc"，把「源没新帧」也当成内容变化，
-        // 结果每 33ms 重画同一张旧纹理（画面看不出变化，功耗和编码帧全是浪费）。
-        compositor.animating = chainIndex == 3
+        compositor.animating = effectMode == 3 || effectMode == 9
     }
 
     val policy = RenderPolicy(
@@ -280,8 +290,8 @@ fun CompositeDemo() {
                 SmallButton("源:${if (useVideo) "视频" else "CPU"}", useVideo) { useVideo = !useVideo }
             }
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-                CHAIN_NAMES.forEachIndexed { i, name ->
-                    SmallButton(name, chainIndex == i) { chainIndex = i }
+                EFFECT_NAMES.forEachIndexed { i, name ->
+                    SmallButton(name, effectMode == i) { effectMode = i }
                 }
             }
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
@@ -304,7 +314,8 @@ fun CompositeDemo() {
             }
             Spacer(Modifier.height(4.dp))
             Text(
-                "4 格分别套 原画 / 灰度+边缘 / 模糊+调色 / 色差+暗角；「自定义 GLSL」是调用方直接传的源码。" +
+                "4 格分别套 原画 / 灰度+边缘 / 模糊+调色 / 色差+暗角；全局效果可叠加 电影感/复古/赛博/梦境 滤镜，" +
+                    "或「混合/转场」与第二路程序化源(proc)做双输入合成。布局支持 焦点(1大+3缩略)/侧栏(主图+侧栏)。" +
                     " 按需渲染（固定开启）只有新帧、参数变化或动画自驱才出帧：静态源显示「空闲 · 0 fps」，视频源贴合解码帧率。",
                 color = Color(0xFF7E85A0), fontSize = 10.sp,
             )
