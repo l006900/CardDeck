@@ -232,7 +232,7 @@ fun FourUp(videoPath: String) {
     }
 
     Column {
-        // 必须固定高度：见下面「按需渲染」那条
+        // 必须固定高度：见下面「HUD 的三个前提」
         Text(
             stats.summary(), maxLines = 1, softWrap = false,
             modifier = Modifier.fillMaxWidth().height(18.dp),
@@ -240,7 +240,7 @@ fun FourUp(videoPath: String) {
         Box(Modifier.weight(1f)) {
             CompositeStage(
                 compositor = compositor,
-                policy = RenderPolicy(RenderMode.ON_DEMAND, maxFps = 30),
+                policy = RenderPolicy(maxFps = 30),
                 modifier = Modifier.fillMaxSize(),
                 onStats = { stats = it },
                 onError = { Log.w("CardDeck", it) },
@@ -310,7 +310,7 @@ fun FourUp(videoPath: String) {
 | `GpuFrameSink` | 自定义一帧输出接出点；`onFrame(texture, w, h, ptsNs)` 在 GL 线程回调 |
 | `Tile` / `TileSpec` / `Tiles` | 画面位置、uv 裁切、每路独立链、常用布局 |
 | `ShaderPass` / `ShaderPasses` | 自定义 GLSL 与内置预设 |
-| `RenderPolicy(mode, maxFps, resolutionScale, maxTextureBytes)` | 默认 `CONTINUOUS` / `60` / `1.0` / `0`；`chooseScale(w, h, maxScale, budget)` 纯函数 |
+| `RenderPolicy(maxFps, resolutionScale, maxTextureBytes)` | 渲染模式恒为连续回调（不可配置），由内容代次门控决定画不画；默认 `60` / `1.0` / `0`；`chooseScale(w, h, maxScale, budget)` 纯函数 |
 | `GpuStats` | `summary()` / `systemLine()` / `flowLine()` 可直接放进 HUD；三行都要固定单行高度，并按可用宽度自适应字号 |
 | `FrameTiming(capacity)` | C++ 无锁帧时钟：延迟 p50/p95、丢帧、帧间隔抖动；`System.loadLibrary` 自动完成 |
 | `GpuTimer` | C++ 侧 `GL_EXT_disjoint_timer_query`；`supported` / `pollMs()`，设备不支持时返回 -1 |
@@ -366,21 +366,80 @@ compositor.passes = listOf(ripple)
 ## 帧调度与性能怎么量
 
 ```kotlin
-compositor.policy = RenderPolicy(RenderMode.ON_DEMAND, maxFps = 30)
-compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开，否则按需渲染会停在静态帧
+compositor.policy = RenderPolicy(maxFps = 30)
+compositor.animating = true   // 只有依赖 uTime 的 shader 才需要；CPU 自产纹理源不用管
 ```
 
-- `CONTINUOUS`：GL 线程按刷新率回调；**布局里没有外部帧源时**按 `maxFps` 硬上限匀速出帧。
-- `ON_DEMAND`：落到 `RENDERMODE_WHEN_DIRTY`，连 GL 渲染回调都不触发，只在有新帧 /
-  参数变化 / 显式 `invalidate()` 时才跑一次。静态源会完全停住。
+**渲染模式恒为 `RENDERMODE_CONTINUOUSLY`，不可配置。** 这不是省电上的妥协，而是正确性要求：
+`WHEN_DIRTY` 下每次 `requestRender()` 只换**一次** `onDrawFrame` 回调，一旦这次回调被
+fps 节流或内容门控跳过，**没有下一次补偿**，该帧就永久丢失——表现就是「一直卡帧」。
+连续回调保证节拍永不断链，省电交给门控：内容没变时回调只做几次比较（最多再加一次全屏 blit）。
 
-**外部帧源由帧到达驱动，而不是由 `maxFps` 猜时刻。** 只要布局里引用了 OES 源
-（`ExternalTextureSource` / `CameraFrameSource`），合成器先 `hasPendingFrame()` 只查询、
-不消费：有新帧立刻画，没新帧就不画（不重复贴上一帧），`maxFps` 退化为无帧时的兜底上限。
+**「不画」不等于「不 swap」——这是 30fps 卡帧的真凶（第五个坑）。**
+`GLSurfaceView` 在连续模式下不管 renderer 画没画，每次迭代都会 `eglSwapBuffers`；
+而双缓冲的后备缓冲里装的是**两帧以前**的画面。于是「隔帧画」的 30fps 场景实际上是：
+
+```
+回调 k    合成 N     → 上屏 N
+回调 k+1  不画，swap → 上屏 N-1（旧缓冲）
+回调 k+2  合成 N+1   → 上屏 N+1
+回调 k+3  不画，swap → 上屏 N（旧缓冲）
+```
+
+真机录屏逐帧差实测正是 `动 动 停 停` 四帧一循环（`4.7 4.7 0 0`，同一页面切到 60fps
+立刻变成每帧都变、完全不卡）。肉眼看就是「一顿一顿、时不时插前面的某一帧」。
+
+所以门控要返回三种模式（`RenderPolicy.presentMode`）：`DRAW` / `REPEAT` / `IDLE`。
+**节流跳过的那次回调必须 `REPEAT`**：不重新合成，只把上一帧的输出再全屏 blit 一次
+（约 0.3ms，比重跑「每路源 + 每格特效链 + 全局后处理」便宜一个数量级），把后备缓冲也刷成
+当前画面。贴一次即可，两块缓冲一致之后继续跳过就安全了——静态页依然是 0 帧空转。
+修复后同一场景实测逐帧差变成 `动 停 动 停`（每组恰好 2 帧），不再出现 3 帧以上的停顿。
+
+**门控判据：出场节拍与内容代次彻底解耦。** 纯函数
+`RenderPolicy.presentMode(pending, dirty, animating, selfProducing, externalPresent, intervalOk, needsRepaint)`
+先决定要不要**重新合成**（内部就是 `shouldDraw`，语义与旧版一致）：
+
+- `dirty`（布局 / 参数变化）→ 立刻画；
+- **`externalPresent`（布局里有视频 / 摄像头源）→ 每个回调都画**，出场恒为屏幕刷新率。
+  内容由源按自己的节奏换，屏幕按固定 16.7ms 换，两者互不牵制；30fps 内容自然显示两次。
+  这条产生的「显示层重复帧」只上屏、**不进编码器**；
+- 纯程序化布局：`animating`（uTime shader）/ `selfProducing`（CPU 自产纹理，
+  `FrameSource.selfAnimating`）→ 内容每帧都变，按 `intervalOk` 按 `maxFps` 节流
+  （节流跳过的回调走 `REPEAT`）；
+- 以上都没有 → **绝不重画**，两块缓冲一致后 `IDLE`（静态页零空转）。
+
+**不要让「新帧到达」去等 vsync 槽位。** 这是踩过的第四条错路：源在 33.3ms 周期上产帧、
+槽位在 16.7ms 网格上开启，两个周期只有不可通约的一点点差，相位会缓慢漂移；某帧一旦落在
+「刚画完的下一个回调」，就要多等一格，出场间隔于是在 33ms / 50ms 之间来回跳（1 帧、2 帧的
+节拍突变），肉眼就是卡顿——**视频页面尤其明显**。正确做法是内容跟着源、出场跟着屏幕：
+每个回调都画，内容延迟恒定为一个 vsync，屏幕上的帧时长自然均匀。
+
+**限速用 vsync 槽位计数，不用时间阈值。** GL 回调被 `eglSwapBuffers` 锁相在 vsync 上
+（~60/s）：时间阈值法（`now - last >= interval`）在 GL 线程迟到大 ~1ms 时会把本该
++33ms 的下一帧滑到 +50ms，实测间隔序列每秒混入 3~5 个 41~50ms 尖峰——画面就是
+「同一格停三拍再跳两格」的顿挫感。槽位计数按
+`N = round(帧间隔 / 实测回调周期)`（EMA 估计）每 N 个回调出一次帧，节奏锁死在 vsync
+整数格上，单次迟到由下一格立刻追平。
+
+**录制喂帧与显示出场是两条独立判据。** 显示为了平滑会重复贴同一帧，编码器绝不能收到它：
+只在 `pending || animating || selfProducing || 无外部源` 时才 `onFrame`，并且 PTS 把
+真实经过时间**吸附到目标帧间隔的整数格**上（既均匀又忠实；源比目标快时按 0.75×间隔
+降采样）。实测 6s 录制：181 帧、PTS 全部 33.3ms、无重复帧、无倒退。
+
 真正的 `updateTexImage()` 放在门控**之后**，帧一直留在 `BufferQueue` 里，
 积压多帧时一次追到最新。帧到达与 GL 回调是两个独立时钟，早先「先消费再门控」
-会让被跳过的回调吞掉新帧、绘制回调重复旧帧，画面一顿一顿甚至看起来像「闪回前几帧」。
-门控规则是纯函数 `RenderPolicy.shouldDraw(...)`，有单测覆盖。
+会让被跳过的回调吞掉新帧、绘制回调重复旧帧。
+
+**验收口径必须看内容，不能看帧数。** 只数「每秒画了几帧」会把重复帧粉饰成满帧：
+真机上曾出现 `draw=30/s` 却每一帧画面都和上一帧完全相同。正确做法有两层：
+
+1. 画完读回合成结果的一整行像素算指纹，与上一帧比对，`dup` 必须为 0；
+2. **最终裁判是「录屏 + 逐帧像素差」**（`adb shell screenrecord` → `ffmpeg` 解码成灰度帧 →
+   相邻帧 MAD）。它看的是**屏幕真正显示了什么**，而不是 renderer 以为自己画了什么。
+   上面那个 30fps 卡帧就是靠它才定位到：renderer 每秒确实合成 30 帧、间隔 33ms 稳定，
+   但屏幕上呈现的是 `动 动 停 停` —— 问题根本不在合成节拍，而在 swap 出来的是哪块缓冲。
+   判断标准：`maxFps` 为屏幕刷新率一半时，相邻帧差应当是严格的 `动 停 动 停`，
+   任何连续 3 帧以上的「停」都是真实卡顿。
 
 `GpuStats`（约每 0.5s 回调一次，已切主线程）里的数字都是实测值，不是估算：
 
@@ -409,11 +468,11 @@ compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开�
 > 别去看视频源或帧调度。早期版本还把 `cpuFrameMs` 算在采样之前，那 50ms 完全不进指标，
 > HUD 一路显示正常，只有肉眼能看出来。
 
-**按需渲染的三个前提**（自己写 HUD 时最容易忽略）：
+**HUD 的三个前提**（否则会自激触发 `onSurfaceChanged`，表现为「空闲还在反复重绘」）：
 
 1. HUD 文本必须**固定高度**：`maxLines = 1, softWrap = false`，并给状态行预留固定高度。
    文本在 1 行 / 2 行之间抖动会带动下方 `GLSurfaceView` 高度抖动，每次 `onSurfaceChanged`
-   都会唤醒按需渲染，看起来像"停不下来"。提示行也一样，别写成「有错才出现」的条件分支，
+   都会触发一次重绘，看起来像"停不下来"。提示行也一样，别写成「有错才出现」的条件分支，
    否则错误出现/消失同样会改高度。
 2. 固定高度只挡住**纵向**换行，挡不住**横向**溢出：`softWrap = false` 时过长的一行会被
    直接裁掉尾部。指标数字一变长（`pss 128.4 MB`、`power 264 mW`），`p95 … ms`、`drop 0`、
@@ -432,7 +491,6 @@ compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开�
 
 ```kotlin
 compositor.policy = RenderPolicy(
-    mode = RenderMode.ON_DEMAND,
     maxFps = 30,
     resolutionScale = 0.75f,        // 手动档位，0.25..1.0
     maxTextureBytes = 8L * 1024 * 1024,  // 0 = 不限制；非 0 时自动往下选档
@@ -486,13 +544,18 @@ EGLContext、只临时切换 draw surface，全程零 CPU 回读。
 val out = File(context.cacheDir, "composite.mp4")
 val recorder = VideoRecorder(out, width = 528, height = 656, fps = 30)
 check(recorder.start())
-compositor.frameSink = recorder
+// attachFrameSink（不要直接赋值 frameSink）：清零录制时钟（起点 + 上一帧 PTS）。
+// 编码器只在「内容代次真的变了」时才收到帧（source.update() 拿到新内容 / uTime 动画 /
+// CPU 自产纹理）；仅仅因为布局或策略变化重画出来的画面内容与上一帧相同，不会送进去。
+// 这正是「渲染出一帧，然后一直插入」的根因修复——旧实现按 animating 无条件放行，
+// 源没新帧时每 33ms 把同一张旧纹理送一次。
+compositor.attachFrameSink(recorder)
 
 // 停止
 recorder.stop()
 compositor.postGl {
     recorder.releaseGl()          // 必须在 GL 线程
-    compositor.frameSink = null
+    compositor.attachFrameSink(null)
 }
 // 等 muxer 落盘后，再用 MediaPlayer.prepare() 校验 / 回放
 recorder.close()
@@ -527,7 +590,7 @@ recorder.close()
 | 回放一直在播上一次的旧视频 | 每次开启回放都新建 `ExternalTextureSource` + `MediaPlayer`，别复用 `created = true` 的旧源 |
 | HUD 显示 `gpu n/a` / `power n/a` | 设备不支持 `GL_EXT_disjoint_timer_query` 或不提供电流读数；这是如实降级，不是初始化失败 |
 | HUD 数字尾部被裁掉（`p95 53.2 r`、`power 25 m`） | 单行 `softWrap = false` 只防纵向换行，横向会硬裁。按宽度自适应字号，或拆两行并给两行都留固定高度；别直接缩短指标字符串，数值位数一变还会重现 |
-| 按需渲染停不下来、显示 1~2 fps | HUD 行数或高度变化引起 `onSurfaceChanged` 自激，见上文「按需渲染的三个前提」 |
+| 空闲时仍反复重绘、显示 1~2 fps | HUD 行数或高度变化引起 `onSurfaceChanged` 自激，见上文「HUD 的三个前提」 |
 | 画面每 0.5 秒规律顿一下，但 fps / cpu 指标看着正常 | 系统级采样（PSS、电量、`/proc`）在 GL 线程同步执行，单次可达 50ms。挪到独立线程，并确认 `cpuFrameMs` 是在整帧结束后才取的。自己接 `GpuCompositor`、在指标回调里顺手读系统状态时尤其容易踩 |
 | Android 15+ 弹「应用兼容性：不符合 16 KB 对齐要求」 | 检查 APK 里每个 `.so` 的 `PT_LOAD p_align` 是否为 `0x4000`；本库已对齐，通常是接入方自己的 native 库仍是 4 KB。可调试应用才弹这个警告，但不代表 release 包能在 16 KB 内核上正常加载 |
 | 视频画面一顿一顿、像「闪回前几帧」 | 先分清是渲染层还是内容层：渲染层看 `fps` 是否贴近源帧率、`jitterP95Ms` 是否异常（它量的是**源**的帧到达抖动）；内容层看测试图案的循环接缝是否闭合。库侧已由帧到达驱动，自定义 `FrameSource` 要覆写 `hasPendingFrame()`，别在 `update()` 之外偷偷消费帧。短视频在 60Hz 屏上解码时偶发 67ms 双间隔属正常节拍差 |

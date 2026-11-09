@@ -48,7 +48,6 @@ import com.arcana.gfx.DynamicTexture2DSource
 import com.arcana.gfx.ExternalTextureSource
 import com.arcana.gfx.GpuCompositor
 import com.arcana.gfx.GpuStats
-import com.arcana.gfx.RenderMode
 import com.arcana.gfx.RenderPolicy
 import com.arcana.gfx.ShaderPasses
 import com.arcana.gfx.TileSpec
@@ -114,7 +113,6 @@ fun CompositeDemo() {
     var layoutIndex by remember { mutableIntStateOf(0) }
     var chainIndex by remember { mutableIntStateOf(1) }
     var fpsCap by remember { mutableIntStateOf(30) }
-    var onDemand by remember { mutableStateOf(false) }
     var useVideo by remember { mutableStateOf(true) }
     var scale by remember { mutableFloatStateOf(1f) }
     var budgetMb by remember { mutableIntStateOf(0) }
@@ -182,14 +180,12 @@ fun CompositeDemo() {
     }
 
     val sourceKey = if (useVideo && videoPath != null) "video" else "proc"
-    // 自定义 GLSL 依赖 uTime，需要连续出帧；按需渲染与它互斥，避免看起来"卡住"。
-    val effectiveOnDemand = onDemand && chainIndex != 3
 
     // GL 线程空闲时根本不会回调 onStats，只显示最后一次快照会把「0 帧」粉饰成高 fps。
     // 事件驱动：每次指标到达就重新挂一个一次性延迟判定，新指标会取消旧的；
     // 没有轮询、没有常驻重组，空闲时只重组一次就停下。
-    LaunchedEffect(effectiveOnDemand, lastStatsAt) {
-        if (!effectiveOnDemand || lastStatsAt == 0L) {
+    LaunchedEffect(lastStatsAt) {
+        if (lastStatsAt == 0L) {
             idle = false
             return@LaunchedEffect
         }
@@ -197,8 +193,8 @@ fun CompositeDemo() {
         if (SystemClock.elapsedRealtime() - lastStatsAt >= 1_000L) idle = true
     }
 
-    LaunchedEffect(sourceKey, layoutIndex, effectiveOnDemand) {
-        procedural.active = !effectiveOnDemand
+    LaunchedEffect(sourceKey, layoutIndex) {
+        procedural.active = true
         val layout = when (layoutIndex) {
             0 -> Tiles.grid(4, columns = 2)
             1 -> Tiles.pictureInPicture()
@@ -222,18 +218,21 @@ fun CompositeDemo() {
         }
     }
 
-    LaunchedEffect(chainIndex) {
+    LaunchedEffect(chainIndex, sourceKey) {
         compositor.passes = when (chainIndex) {
             0 -> emptyList()
             1 -> listOf(ShaderPasses.colorGrade())
             2 -> listOf(ShaderPasses.chromaShift(5f), ShaderPasses.vignette(0.45f, 0.3f))
             else -> listOf(ShaderPasses.custom("ripple", CUSTOM_GLSL))
         }
-        compositor.animating = chainIndex >= 2
+        // animating 只表示「内容依赖 uTime，必须连续推进」——目前只有 ripple 那条自定义 GLSL。
+        // CPU 程序化纹理源不用它：DynamicTexture2DSource.selfAnimating 自己会报「在产帧」。
+        // 早先这里写成 chainIndex >= 2 || sourceKey == "proc"，把「源没新帧」也当成内容变化，
+        // 结果每 33ms 重画同一张旧纹理（画面看不出变化，功耗和编码帧全是浪费）。
+        compositor.animating = chainIndex == 3
     }
 
     val policy = RenderPolicy(
-        mode = if (effectiveOnDemand) RenderMode.ON_DEMAND else RenderMode.CONTINUOUS,
         maxFps = fpsCap,
         resolutionScale = scale,
         maxTextureBytes = budgetMb.toLong() * 1_048_576L,
@@ -287,7 +286,6 @@ fun CompositeDemo() {
             }
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                 SmallButton("$fpsCap fps", true) { fpsCap = if (fpsCap == 30) 60 else 30 }
-                SmallButton("按需渲染 ${if (onDemand) "ON" else "OFF"}", onDemand) { onDemand = !onDemand }
                 SmallButton("强制重画", false) { compositor.invalidate() }
             }
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
@@ -307,7 +305,7 @@ fun CompositeDemo() {
             Spacer(Modifier.height(4.dp))
             Text(
                 "4 格分别套 原画 / 灰度+边缘 / 模糊+调色 / 色差+暗角；「自定义 GLSL」是调用方直接传的源码。" +
-                    " 按需渲染下只有新帧或参数变化才出帧：静态源会显示「空闲 · 0 fps」，视频源贴合解码帧率。",
+                    " 按需渲染（固定开启）只有新帧、参数变化或动画自驱才出帧：静态源显示「空闲 · 0 fps」，视频源贴合解码帧率。",
                 color = Color(0xFF7E85A0), fontSize = 10.sp,
             )
         }

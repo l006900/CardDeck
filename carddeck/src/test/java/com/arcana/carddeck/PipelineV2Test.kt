@@ -1,7 +1,7 @@
 package com.arcana.carddeck
 
 import com.arcana.gfx.GpuStats
-import com.arcana.gfx.RenderMode
+import com.arcana.gfx.PresentMode
 import com.arcana.gfx.RenderPolicy
 import com.arcana.gfx.ShaderPasses
 import com.arcana.gfx.TileSpec
@@ -105,43 +105,90 @@ class PipelineV2Test {
         assertEquals(emptyList<com.arcana.gfx.ShaderPass>(), TileSpec("cam", Tiles.full()).passes)
     }
 
-    /* ---- 帧驱动门控：旧实现「先消费帧再门控」会吞帧 + 重复帧，这里锁住行为 ---- */
+    /* ---- 帧驱动门控：出场节拍与内容代次解耦，锁住四次踩坑后的正确行为 ---- */
 
     private fun draw(
         pending: Boolean = false,
         dirty: Boolean = false,
         animating: Boolean = false,
+        selfProducing: Boolean = false,
+        externalPresent: Boolean = false,
         intervalOk: Boolean = true,
-        mode: RenderMode = RenderMode.CONTINUOUS,
-        frameDriven: Boolean = true,
-    ) = RenderPolicy.shouldDraw(pending, dirty, animating, intervalOk, mode, frameDriven)
+    ) = RenderPolicy.shouldDraw(
+        pending, dirty, animating, selfProducing, externalPresent, intervalOk,
+    )
 
     @Test
-    fun arrivingFrameIsDrawnEvenBeforeFpsInterval() {
-        // 帧到达本身就是节拍，不能被 maxFps 拖到下一个回调（否则新帧被覆盖）。
-        assertTrue(draw(pending = true, intervalOk = false))
-        assertTrue(draw(pending = true, intervalOk = false, mode = RenderMode.ON_DEMAND))
+    fun externalSourcePresentsEveryVsync() {
+        // 视频 / 摄像头布局：出场恒为屏幕刷新率。
+        // 让「新帧到达」等 vsync 槽位会因源周期与槽位周期相位漂移，
+        // 退化成 33ms / 50ms 交替（就是「视频也卡」），所以有外部源时一律放行。
+        assertTrue(draw(externalPresent = true, intervalOk = true))
+        assertTrue(draw(externalPresent = true, intervalOk = false))
+        assertTrue(draw(pending = true, externalPresent = true, intervalOk = false))
     }
 
     @Test
-    fun frameDrivenLayoutNeverRepeatsAFrame() {
-        // 修复前 142/297 次绘制没有新帧，重复贴上一帧 = 肉眼可见的顿挫。
-        assertFalse(draw(pending = false, intervalOk = true, frameDriven = true))
-        assertFalse(draw(pending = false, intervalOk = true, mode = RenderMode.ON_DEMAND))
+    fun unchangedContentIsNeverRedrawn() {
+        // 「渲染出一帧，然后一直插入」的根因：内容没变还在重画旧纹理。
+        // 纯程序化布局里无新帧、无变化、无动画、无自产源 → 不画（静态页零空转）。
+        assertFalse(draw(intervalOk = true))
+        assertFalse(draw(intervalOk = false))
     }
 
     @Test
-    fun proceduralLayoutStillDrawsAtFpsCap() {
-        // 没有外部帧源时仍由 maxFps 匀速驱动，别把 CPU 动态纹理也停掉。
-        assertTrue(draw(pending = false, intervalOk = true, frameDriven = false))
-        assertFalse(draw(pending = false, intervalOk = false, frameDriven = false))
-    }
-
-    @Test
-    fun dirtyAppliesImmediatelyButAnimationStillObeysFpsCap() {
-        assertTrue(draw(dirty = true, intervalOk = false))
-        assertFalse(draw(animating = true, intervalOk = false))
+    fun animatedContentObeysFpsCap() {
+        // uTime shader / CPU 自产纹理：内容每帧都变，但必须按 vsync 槽位节流。
         assertTrue(draw(animating = true, intervalOk = true))
+        assertFalse(draw(animating = true, intervalOk = false))
+        assertTrue(draw(selfProducing = true, intervalOk = true))
+        assertFalse(draw(selfProducing = true, intervalOk = false))
+    }
+
+    @Test
+    fun structureChangeAppliesImmediately() {
+        // 布局 / 策略变化要立刻生效，不受 fps 上限拖到下一轮。
+        assertTrue(draw(dirty = true, intervalOk = false))
+    }
+
+    /* ---- 上屏模式：不合成也必须重贴一次，否则 swap 会把旧缓冲翻上来 ---- */
+
+    private fun mode(
+        pending: Boolean = false,
+        dirty: Boolean = false,
+        animating: Boolean = false,
+        selfProducing: Boolean = false,
+        externalPresent: Boolean = false,
+        intervalOk: Boolean = true,
+        needsRepaint: Boolean = false,
+    ) = RenderPolicy.presentMode(
+        pending, dirty, animating, selfProducing, externalPresent, intervalOk, needsRepaint,
+    )
+
+    @Test
+    fun throttledFrameStillRepaintsInsteadOfSkipping() {
+        // 30fps 卡帧的真凶：节流跳过的回调里 GLSurfaceView 照样 swap，
+        // 双缓冲把「两帧以前」的旧画面翻上来 → 录屏看到「动 动 停 停」。
+        // 所以「不合成 + 后备缓冲是旧的」必须是 REPEAT，不能是 IDLE。
+        assertEquals(PresentMode.REPEAT, mode(selfProducing = true, intervalOk = false, needsRepaint = true))
+        assertEquals(PresentMode.DRAW, mode(selfProducing = true, intervalOk = true, needsRepaint = true))
+        // 重贴一次后两个缓冲一致，再跳过就安全了（省电、静态页仍然 0 帧）。
+        assertEquals(PresentMode.IDLE, mode(selfProducing = true, intervalOk = false, needsRepaint = false))
+    }
+
+    @Test
+    fun staticPageSettlesToIdleAfterOneRepaint() {
+        // 内容不再变化：先重贴一次把两块缓冲抹平，之后彻底不画。
+        assertEquals(PresentMode.DRAW, mode(dirty = true, needsRepaint = true))
+        assertEquals(PresentMode.REPEAT, mode(needsRepaint = true))
+        assertEquals(PresentMode.IDLE, mode(needsRepaint = false))
+    }
+
+    @Test
+    fun externalSourceNeverFallsBackToRepeat() {
+        // 视频 / 摄像头每个回调都 DRAW，压根走不到 REPEAT。
+        assertEquals(PresentMode.DRAW, mode(externalPresent = true, intervalOk = false, needsRepaint = true))
+        assertEquals(PresentMode.DRAW, mode(externalPresent = true, intervalOk = true, needsRepaint = false))
     }
 
     private inline fun expectIllegalArgument(block: () -> Unit) {

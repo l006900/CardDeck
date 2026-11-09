@@ -58,6 +58,15 @@ interface FrameSource {
     fun hasPendingFrame(): Boolean = false
 
     /**
+     * 这一路源**自己会产新内容**（CPU 每帧生成的纹理 / 程序化图案），不依赖外部推帧。
+     *
+     * 合成器据此判断「内容代次是否会变」：外部 OES 源看 [hasPendingFrame]，
+     * 自产源看这个标志。调用方不用再手动设 [GpuCompositor.animating]——
+     * 早先靠调用方记得设 animating，漏设一次画面就永久冻在最后一帧（「卡固定帧」）。
+     */
+    val selfAnimating: Boolean get() = false
+
+    /**
      * GL 线程：把最新一帧锁进纹理。
      * @return 0 = 没有新帧；否则返回该帧的到达时刻（`System.nanoTime()` 基准），供帧延迟统计。
      */
@@ -156,9 +165,17 @@ class ExternalTextureSource(
         if (pending == consumedCount || texId == 0) return 0L
         // 一次最多消费 4 帧：长时间后台回来时不至于卡在 while 里，多余帧下次再追。
         val delta = min(pending - consumedCount, 4L).toInt()
-        repeat(delta) { st.updateTexImage() }
+        try {
+            repeat(delta) { st.updateTexImage() }
+            synchronized(matrixLock) { st.getTransformMatrix(matrix) }
+        } catch (e: IllegalStateException) {
+            // 生产端把缓冲「放弃」了（切换源、Surface 重建、播放器 release 都会走到这里），
+            // SurfaceTexture 会抛 `Unable to update texture contents`。
+            // 这里吞掉并丢弃这批计数：让这一帧显示上一张纹理，绝不能把 GL 线程崩掉。
+            consumedCount = pending
+            return 0L
+        }
         consumedCount = pending
-        synchronized(matrixLock) { st.getTransformMatrix(matrix) }
         return lastArrivalNs
     }
 
@@ -231,9 +248,12 @@ class DynamicTexture2DSource(
     private var frameIndex = 0
     private var created = false
 
-    /** 关掉后本路不再产新帧：ON_DEMAND 模式下才能真正停在一帧上（省电验证用）。 */
+    /** 关掉后本路不再产新帧：才能真正停在一帧上（省电验证用）。 */
     @Volatile
     var active: Boolean = true
+
+    /** 只要还在产帧，内容代次每帧都变，合成器不需要外部再设 animating。 */
+    override val selfAnimating: Boolean get() = active
 
     override fun onGlCreated() {
         if (created) return

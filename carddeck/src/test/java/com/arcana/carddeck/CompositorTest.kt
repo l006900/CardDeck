@@ -1,7 +1,6 @@
 package com.arcana.carddeck
 
 import com.arcana.gfx.GpuStats
-import com.arcana.gfx.RenderMode
 import com.arcana.gfx.RenderPolicy
 import com.arcana.gfx.ShaderPass
 import com.arcana.gfx.ShaderPasses
@@ -91,7 +90,6 @@ class CompositorTest {
     fun renderPolicyFrameIntervals() {
         assertEquals(33_333_333L, RenderPolicy(maxFps = 30).frameIntervalNs())
         assertEquals(16_666_666L, RenderPolicy(maxFps = 60).frameIntervalNs())
-        assertEquals(RenderMode.CONTINUOUS, RenderPolicy().mode)
         expectIllegalArgument { RenderPolicy(maxFps = 0) }
         expectIllegalArgument { RenderPolicy(maxFps = 121) }
     }

@@ -12,12 +12,17 @@ import com.arcana.gl.MsaaConfigChooser
  * `PixelFormat.TRANSLUCENT`、`setZOrderOnTop`，这样 GL 只占一块区域，
  * 透明像素仍能露出下面的 Compose UI。
  *
- * [applyPolicy] 把 [RenderMode.ON_DEMAND] 真正落到 `RENDERMODE_WHEN_DIRTY`：
- * 不只是「跳过绘制」，而是连 GL 线程的渲染回调都不触发，这是省电的关键。
+ * **渲染模式恒为 `RENDERMODE_CONTINUOUSLY`，不接受外部配置。**
+ *
+ * 这是踩坑之后的结论：`RENDERMODE_WHEN_DIRTY` 下每次 `requestRender()` 只换一次
+ * `onDrawFrame` 回调，一旦这次回调被 fps 节流或内容门控跳过，**没有下一次补偿**，
+ * 该帧就永久丢失 → 表现为「一直卡帧」。连续回调保证节拍永不断链，
+ * 省电交给门控：内容代次没变时 `onDrawFrame` 只做几次比较就 return，
+ * 不碰 GLES、不产生 draw call、不 swap，代价可以忽略。
  */
 class CompositeSurfaceHost(
     context: Context,
-    renderer: GpuCompositor,
+    private val renderer: GpuCompositor,
 ) : GLSurfaceView(context) {
 
     init {
@@ -30,13 +35,11 @@ class CompositeSurfaceHost(
         renderer.attach(this)
     }
 
+    /** 策略变化只需同步帧率 / 分辨率 / 显存预算；渲染模式恒为连续回调，不再接受覆写。 */
     fun applyPolicy(policy: RenderPolicy) {
-        val next = when (policy.mode) {
-            RenderMode.CONTINUOUS -> RENDERMODE_CONTINUOUSLY
-            RenderMode.ON_DEMAND -> RENDERMODE_WHEN_DIRTY
+        if (renderMode != RENDERMODE_CONTINUOUSLY) {
+            renderMode = RENDERMODE_CONTINUOUSLY
+            requestRender()
         }
-        if (renderMode == next) return
-        renderMode = next
-        requestRender()
     }
 }

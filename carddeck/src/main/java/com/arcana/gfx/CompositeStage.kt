@@ -26,11 +26,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
  *     compositor.tiles = Tiles.grid(4).map { TileSpec("cam", it) }
  *     compositor.passes = ShaderPasses.blur(2f) + ShaderPasses.colorGrade()
  * }
- * CompositeStage(compositor, policy = RenderPolicy(RenderMode.ON_DEMAND, 30),
+ * CompositeStage(compositor, policy = RenderPolicy(maxFps = 30),
  *                modifier = Modifier.fillMaxSize(), onStats = { stats = it })
  * ```
  *
- * @param policy 帧调度；变化时会同步到 GLSurfaceView 的 renderMode。
+ * @param policy fps / 分辨率 / 显存预算策略；渲染模式恒为按需（WHEN_DIRTY），不可配置。
  * @param onStats 约每 0.5s 一次的实测指标（已切回主线程）。
  * @param onError 自定义 GLSL 编译失败等可恢复错误。
  */
@@ -57,7 +57,7 @@ fun CompositeStage(
     }
     LaunchedEffect(
         compositor,
-        policy.mode, policy.maxFps, policy.resolutionScale, policy.maxTextureBytes,
+        policy.maxFps, policy.resolutionScale, policy.maxTextureBytes,
     ) { compositor.policy = policy }
 
     // GLSurfaceView 不自动跟随生命周期：不接的话页面进后台 GL 线程仍在连续渲染。

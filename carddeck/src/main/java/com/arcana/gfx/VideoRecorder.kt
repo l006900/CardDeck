@@ -32,9 +32,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - `gfx-encoder` 线程：drain MediaCodec 输出、MediaMuxer 写 MP4；
  * - 任意线程：[start] / [stop] / [close]。
  *
- * 用法：`start()` → `compositor.frameSink = recorder` → `stop()` →
- * `compositor.postGl { recorder.releaseGl(); compositor.frameSink = null }`。
+ * 用法：`start()` → `compositor.attachFrameSink(recorder)` → `stop()` →
+ * `compositor.postGl { recorder.releaseGl(); compositor.attachFrameSink(null) }`。
  * [releaseGl] 必须在 GL 线程调用，见 [GpuCompositor.postGl]。
+ * 用 [GpuCompositor.attachFrameSink] 而不是赋值 [GpuCompositor.frameSink]，
+ * 是为了让合成器切到「按需渲染（WHEN_DIRTY）」、由源帧到达驱动录制，并在源帧率高于
+ * [targetFps] 时降采样，从根上避免把旧帧反复编码成定帧 / 插帧。
  */
 class VideoRecorder(
     private val output: File,
@@ -44,6 +47,9 @@ class VideoRecorder(
     private val bitRate: Int = 2_000_000,
     private val onError: ((String) -> Unit)? = null,
 ) : GpuFrameSink, AutoCloseable {
+
+    /** 录制目标帧率：合成器据此稳速出帧并生成均匀 PTS。 */
+    override val targetFps: Int = fps
 
     @Volatile private var accepting = false
     @Volatile private var written = 0

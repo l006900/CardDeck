@@ -58,7 +58,12 @@ class GpuCompositor : GLSurfaceView.Renderer {
             invalidate()
         }
 
-    /** 有依赖 uTime 的动态效果时置 true，让 ON_DEMAND 模式也持续出帧。 */
+    /**
+     * 有依赖 uTime 的动态 shader 时置 true：内容代次每帧都算变，按 maxFps 节流出帧。
+     *
+     * **不再承担「自驱 requestRender」的职责**——宿主恒为连续回调，节拍由渲染线程自己维持。
+     * CPU 自产纹理（[DynamicTexture2DSource]）不用这个标志，它自己的 `selfAnimating` 会报。
+     */
     @Volatile
     var animating: Boolean = false
 
@@ -120,7 +125,23 @@ class GpuCompositor : GLSurfaceView.Renderer {
     private var windowDropped = 0
     private var lastEncodedFrames = 0
     private var dirty = true
+    /** 上一个被换出去的缓冲里装的不是当前画面：下一次跳过合成时必须重贴一次。 */
+    private var needsRepaint = false
     private var released = false
+
+    // 录制时钟：仅在 frameSink（编码器接出点）非空时启用。
+    // PTS 用「序号 × 目标帧间隔」的 CFR 序列（源到达抖动不进时间戳），
+    // recordLastFeedNs 用于把比目标帧率更快的源降采样到目标帧率。
+    private var recordStartNs = 0L
+    private var recordFrameIndex = 0L
+    private var recordLastPtsNs = -1L
+    private var recordLastFeedNs = 0L
+
+    // 稳态节拍：回调槽位计数（vsync 锁相），见 onDrawFrame 内注释。
+    private var cbLastNs = 0L
+    private var cbPeriodEma = 0.0
+    private var slotSinceDraw = 0
+
 
     init {
         Matrix.setIdentityM(identity, 0)
@@ -170,6 +191,22 @@ class GpuCompositor : GLSurfaceView.Renderer {
         if (released) return
         dirty = true
         host?.requestRender()
+    }
+
+    /**
+     * 把合成结果接给编码器（录制开始）或断开（录制结束）。
+     *
+     * 只清录制时钟（起点 + 上一帧 PTS），**不动渲染模式**：宿主恒为连续回调，
+     * 由「内容代次」门控决定画不画、送不送。旧实现会在这里切 `WHEN_DIRTY`，
+     * 而按需渲染下每次 `requestRender` 只换一次回调，门控一旦跳过就**永久丢帧**
+     * （没有下一次补偿），正是「一直卡帧」的来源。
+     */
+    fun attachFrameSink(sink: GpuFrameSink?) {
+        frameSink = sink
+        recordStartNs = 0L
+        recordFrameIndex = 0L
+        recordLastPtsNs = -1L
+        recordLastFeedNs = 0L
     }
 
     /**
@@ -261,44 +298,73 @@ class GpuCompositor : GLSurfaceView.Renderer {
         val specs = tiles
         val active = activeSourceKeys
         val currentPolicy = policy
+        val sink = frameSink
+        val recording = sink != null
 
         // 1) **只查询、不消费**：帧到达与 GL 回调是两个独立时钟。
-        //    旧实现先 updateTexImage() 再做 maxFps 门控，被跳过的回调照样把新帧取走：
-        //    真机 8s 里 163 次 SKIP 带着新帧、142 次 DRAW 却没有新帧（重复上一帧），
-        //    连续两个跳过回调各来一帧时前一帧直接被覆盖。绘制间隔 p95 67.8ms，
-        //    高频条纹图案在这种非均匀重采样下会出现"闪回前几帧"的相位错觉。
+        //    被节流跳过的回调不能把新帧取走——帧留在 BufferQueue 里，下次真正绘制时一次追到最新。
         var pending = false
         for ((key, s) in sources) {
-            if (active.contains(key) && s.hasPendingFrame()) {
+            if (active.contains(key) && s.external && s.hasPendingFrame()) {
                 pending = true
                 break
             }
         }
-        // 布局里只要有外部帧源，渲染就由帧到达驱动（30fps 源天然就是 30fps）；
-        // maxFps 退化为「无帧时」的兜底上限，只对纯程序化 / 动画源做限速。
-        val frameDriven = active.any { sources[it]?.external == true }
-        val intervalOk = renderNs - lastDrawNs >= currentPolicy.frameIntervalNs() - FRAME_TOLERANCE_NS
-        if (!RenderPolicy.shouldDraw(
-                pending = pending,
-                dirty = dirty,
-                animating = animating,
-                intervalOk = intervalOk,
-                mode = currentPolicy.mode,
-                frameDriven = frameDriven,
-            )
-        ) return
+        // 2) 内容代次会不会变：外部新帧 / uTime 动画 / CPU 自产纹理 / 布局参数变化。
+        val selfProducing = active.any { sources[it]?.selfAnimating == true }
+        // 布局里有没有外部帧源（视频 / 摄像头）：有则**恒定刷新率出场**，见 shouldDraw 第 2 条。
+        val externalPresent = active.any { sources[it]?.external == true }
 
-        // 2) 真正要画了才锁帧：注册了但没被 tile 引用的源不碰 GLES；
-        //    队列里若积压了多帧，update() 会一次追到最新，不再把旧帧显示出来。
+        // 3) 稳态节拍：槽位计数（回调被 eglSwapBuffers 锁相在 vsync 上，实测 ≈60/s）。
+        //    不用「时间阈值」——GL 线程迟到大 1ms 就会把 k+2 号回调判为「未到间隔」而跳过，
+        //    该帧滑到 k+3（+50ms）才画，实测每秒混 3~5 个 41~50ms 尖峰就是它造成的。
+        //    槽位计数把节奏锁在 vsync 整数格上，单次迟到由下一格立刻追平，零滑拍。
+        if (cbLastNs != 0L) {
+            val d = renderNs - cbLastNs
+            if (d in 1..100_000_000L) {
+                cbPeriodEma = if (cbPeriodEma == 0.0) d.toDouble()
+                else cbPeriodEma * 0.9 + d * 0.1
+            }
+        }
+        cbLastNs = renderNs
+        slotSinceDraw++
+        val cbPeriod = if (cbPeriodEma > 1_000_000.0) cbPeriodEma else 16_666_666.0
+        val slotsPerFrame =
+            (currentPolicy.frameIntervalNs() / cbPeriod).coerceIn(1.0, 8.0)
+        val intervalOk = slotSinceDraw >= Math.round(slotsPerFrame)
+
+        val mode = RenderPolicy.presentMode(
+            pending = pending,
+            dirty = dirty,
+            animating = animating,
+            selfProducing = selfProducing,
+            externalPresent = externalPresent,
+            intervalOk = intervalOk,
+            needsRepaint = needsRepaint,
+        )
+
+        // 3b) 不重新合成，但后备缓冲里还是旧画面 → 把当前输出重贴一次（一次 blit）。
+        //     不做这一步，`eglSwapBuffers` 会把两帧以前的旧缓冲翻上来，
+        //     30fps 就变成「动 动 停 停」（详见 RenderPolicy.presentMode 的注释）。
+        if (mode == PresentMode.REPEAT) {
+            repeatPresent()
+            needsRepaint = false
+            return
+        }
+        if (mode == PresentMode.IDLE) return
+
+        // 4) 真正要画了才锁帧：注册了但没被 tile 引用的源不碰 GLES；
+        //    队列里若积压了多帧，update() 会一次追到最新，不会把旧帧显示出来。
         for ((key, s) in sources) {
             if (active.contains(key)) s.update()
         }
-        // 3) 分辨率 / 显存预算是策略的一部分：变化时在真正绘制前重建离屏目标。
+        // 5) 分辨率 / 显存预算是策略的一部分：变化时在真正绘制前重建离屏目标。
         if (currentPolicy.resolutionScale != appliedPolicyScale ||
             currentPolicy.maxTextureBytes != appliedBudget || targets.read.texture == 0
         ) ensureTargets()
         dirty = false
         lastDrawNs = renderNs
+        slotSinceDraw = 0
 
         val t = (renderNs - startNs) / 1_000_000_000f
         val twoD = blit2D
@@ -380,11 +446,46 @@ class GpuCompositor : GLSurfaceView.Renderer {
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         blitTexture2D(twoD, targets.read.texture)
         draws++
+        // 这一帧被换出去了，后备缓冲此刻装的还是更早的画面；下一次若因节流不合成，
+        // 必须重贴一次，否则 swap 会把旧画面翻上来（30fps「动 动 停 停」的根因）。
+        needsRepaint = true
         // timer query 必须在本 context 内闭合：编码器会切走 EGL context，别把它的开销算进 GPU 时间。
         if (timingActive) gpuTimer.end()
 
-        // 6) 可选：把最终合成纹理接给外部编码器（GL 线程，共享 EGL context 内二次渲染）。
-        frameSink?.onFrame(targets.read.texture, sceneW, sceneH, renderNs)
+        // 6) 把最终合成纹理接给外部编码器（GL 线程，共享 EGL context 内二次渲染）。
+        //
+        //    **只喂「内容代次真的变了」的帧**：pending（外部新帧）/ animating（uTime 动画）/
+        //    selfProducing（CPU 自产纹理）；布局里根本没有外部源时每次重画内容都在变，也算。
+        //    第 2 步为保证出场平滑，视频页每个 vsync 都会重画一次**内容未变**的画面——
+        //    那些帧只用于显示层，绝不能送编码器，否则就是「渲染出一帧然后一直插它」。
+        //
+        //    PTS 不能直接用墙钟：源到达时刻自带 ±7ms 抖动，帧时长就会在 23~45ms 之间跳
+        //    （播放器看起来就是卡）。也不能用「序号 × 间隔」：源比目标慢时会把视频压短、
+        //    播放变快。正确做法是把**真实经过时间吸附到目标帧间隔的整数格**上——
+        //    既均匀（同一格内的抖动被吃掉），又忠实（真的慢了就多占几格，确实是定格）。
+        //    `tooSoon` 负责反向：源比目标快时按 0.75×间隔降采样，输出锁在目标帧率。
+        if (recording) {
+            val first = recordStartNs == 0L
+            if (first) recordStartNs = renderNs
+            val contentChanged = pending || animating || selfProducing || !externalPresent
+            val targetFps = sink!!.targetFps
+            val intervalNs = if (targetFps > 0) 1_000_000_000L / targetFps else 0L
+            val tooSoon = intervalNs > 0 && !first &&
+                renderNs - recordLastFeedNs < intervalNs * 3 / 4
+            if (contentChanged && !tooSoon) {
+                val elapsed = (renderNs - recordStartNs).coerceAtLeast(0L)
+                val pts = if (intervalNs > 0) {
+                    val snapped = Math.round(elapsed.toDouble() / intervalNs) * intervalNs
+                    if (snapped <= recordLastPtsNs) recordLastPtsNs + intervalNs else snapped
+                } else {
+                    elapsed
+                }
+                recordLastPtsNs = pts
+                recordLastFeedNs = renderNs
+                recordFrameIndex++
+                frameSink?.onFrame(targets.read.texture, sceneW, sceneH, pts)
+            }
+        }
 
         // 7) 指标：只统计真正渲染的帧，跳过的帧不算进 FPS
         val latency = timing.drain(renderNs)
@@ -403,7 +504,6 @@ class GpuCompositor : GLSurfaceView.Renderer {
             // 系统采样投递到独立后台线程：同步 binder 单次约 50ms，绝不能落在 GL 线程。
             systemMeters?.requestSample()
             val sys = systemMeters?.latest()
-            val sink = frameSink
             if (sink != null) lastEncodedFrames = sink.framesWritten()
             val snapshot = GpuStats(
                 fps = fps,
@@ -415,7 +515,6 @@ class GpuCompositor : GLSurfaceView.Renderer {
                 latencyP50Ms = latency[1],
                 latencyP95Ms = latency[2],
                 droppedFrames = dropped,
-                mode = currentPolicy.mode,
                 gpuFrameMs = gpuTimer.pollMs(),
                 cpuPercent = sys?.cpuPercent ?: 0f,
                 pssKb = sys?.pssKb ?: 0,
@@ -518,6 +617,26 @@ class GpuCompositor : GLSurfaceView.Renderer {
         drawQuad(program.pos, program.uv)
     }
 
+    /**
+     * 只重贴、不重新合成：把上一帧的输出再画进默认帧缓冲。
+     *
+     * 一次 clear + 一次全屏 quad（约 0.3ms），比重新跑「每路源 + 每格特效链 + 全局后处理」
+     * 便宜一个数量级；换来的是**两个缓冲区内容始终一致**，swap 翻哪张都不会出现旧帧。
+     * 不碰 [targets]、不改 [slotSinceDraw]、不计入 fps 与编码帧。
+     */
+    private fun repeatPresent() {
+        val program = blit2D ?: return
+        val texture = targets.read.texture
+        if (texture == 0) return
+        GLES20.glBindFramebuffer(GLES20.GL_FRAMEBUFFER, 0)
+        GLES20.glViewport(0, 0, viewW, viewH)
+        GLES20.glClearColor(0f, 0f, 0f, 0f)
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        GLES20.glEnable(GLES20.GL_BLEND)
+        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
+        blitTexture2D(program, texture)
+    }
+
     /** 一次后处理：从 read 采样、写进 write、交换。texel 用目标自身尺寸。 */
     private fun runPass(
         program: PassProgram,
@@ -556,6 +675,5 @@ class GpuCompositor : GLSurfaceView.Renderer {
 
     private companion object {
         /** 允许 1ms 的调度抖动，避免 60fps 边界上因为回调早到而整帧被跳过。 */
-        const val FRAME_TOLERANCE_NS = 1_000_000L
     }
 }

@@ -168,6 +168,11 @@ fun CaptureDemo() {
             )
             else -> listOf(TileSpec("proc", Tiles.full(0.02f)))
         }
+        // 这里**不能**置 animating=true：它会把「内容代次」判成每帧都变，
+        // 于是源没来新帧时也每 33ms 重画旧纹理并送进编码器 = 「渲染一帧，然后一直插它」。
+        // proc 格是 DynamicTexture2DSource，它自己的 selfAnimating 已经会报「在产帧」；
+        // cam / playback 是外部 OES 源，由 hasPendingFrame 驱动。
+        compositor.animating = false
         compositor.invalidate()
     }
 
@@ -177,7 +182,7 @@ fun CaptureDemo() {
         recording = false
         compositor.postGl {
             r.releaseGl()
-            compositor.frameSink = null
+            compositor.attachFrameSink(null)
         }
     }
 
@@ -259,7 +264,7 @@ fun CaptureDemo() {
                         )
                         if (r.start()) {
                             recorderRef.value = r
-                            compositor.frameSink = r
+                            compositor.attachFrameSink(r)
                             recordInfo = "录制中…"
                             recording = true
                         } else {
