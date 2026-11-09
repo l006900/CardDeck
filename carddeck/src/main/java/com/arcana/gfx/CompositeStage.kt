@@ -55,7 +55,10 @@ fun CompositeStage(
         compositor.onStats = { statsState.value?.invoke(it) }
         compositor.onError = { errorState.value?.invoke(it) }
     }
-    LaunchedEffect(compositor, policy.mode, policy.maxFps) { compositor.policy = policy }
+    LaunchedEffect(
+        compositor,
+        policy.mode, policy.maxFps, policy.resolutionScale, policy.maxTextureBytes,
+    ) { compositor.policy = policy }
 
     // GLSurfaceView 不自动跟随生命周期：不接的话页面进后台 GL 线程仍在连续渲染。
     DisposableEffect(lifecycleOwner, compositor) {

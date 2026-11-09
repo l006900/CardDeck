@@ -11,7 +11,11 @@ package com.arcana.gfx
  *
  * 用法：`frameSink = { timing.push(it) }`（解码线程）→ `timing.drain(renderNs)`（GL 线程）。
  *
- * [drain] 返回的数组：`[本帧消费帧数, p50Ms, p95Ms, maxMs, 本窗口丢弃帧数]`。
+ * [drain] 返回的数组：
+ * `[本帧消费帧数, p50Ms, p95Ms, maxMs, 本窗口丢弃帧数, 帧间隔抖动 p95-p50(ms)]`。
+ *
+ * 最后一项是**播放流畅度**指标：解码/采集帧到达间隔的长尾抖动，
+ * 恒定 30fps 时接近 0，掉帧或解码抖动时显著变大，比平均 fps 更能反映"卡不卡"。
  */
 class FrameTiming(capacity: Int = 240) : AutoCloseable {
 
@@ -22,7 +26,7 @@ class FrameTiming(capacity: Int = 240) : AutoCloseable {
     }
 
     private var handle: Long = nativeCreate(capacity.coerceIn(16, 4096))
-    private val out = FloatArray(5)
+    private val out = FloatArray(6)
 
     /** 生产者线程：记录一帧到达。返回 false 表示队列已满（背压，计入 dropped）。 */
     fun push(arrivalNs: Long): Boolean =

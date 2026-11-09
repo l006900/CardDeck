@@ -70,12 +70,28 @@ class GpuCompositor : GLSurfaceView.Renderer {
     @Volatile
     var onError: ((String) -> Unit)? = null
 
+    /**
+     * 可选的一帧输出接出点（GL 线程回调）。典型用途是把合成结果送进 MediaCodec 编码。
+     * 传进来的 texture 属于当前 EGL share group；实现方要自己管理 context 切换。
+     */
+    @Volatile
+    var frameSink: GpuFrameSink? = null
+
     private val sources = ConcurrentHashMap<String, FrameSource>()
     private val timing = FrameTiming()
+    private val gpuTimer = GpuTimer()
+    private var systemMeters: SystemMeters? = null
     private val targets = TargetPair()
     /** 每路画面独有的 ping-pong 目标，按 tile 下标复用，布局切换时才重建。 */
     private val tilePairs = ArrayList<TargetPair>()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // 离屏合成尺寸 = 屏幕尺寸 × 实际生效的缩放；输出到屏幕时线性上采样。
+    private var sceneW = 1
+    private var sceneH = 1
+    private var appliedScale = 1f
+    private var appliedPolicyScale = 1f
+    private var appliedBudget = 0L
 
     private val identity = FloatArray(16)
     private val stScratch = FloatArray(16)
@@ -101,6 +117,8 @@ class GpuCompositor : GLSurfaceView.Renderer {
     private var lastDrawNs = 0L
     private var fpsWindowStart = 0f
     private var frames = 0
+    private var windowDropped = 0
+    private var lastEncodedFrames = 0
     private var dirty = true
     private var released = false
 
@@ -113,6 +131,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
     /** 由 [CompositeStage] 在 View 创建后调用，用于 queueEvent / requestRender。 */
     fun attach(view: GLSurfaceView) {
         host = view
+        systemMeters = SystemMeters(view.context.applicationContext)
     }
 
     /**
@@ -121,14 +140,14 @@ class GpuCompositor : GLSurfaceView.Renderer {
      */
     fun register(key: String, source: FrameSource) {
         sources[key] = source
-        if (source is ExternalTextureSource) {
-            source.frameSink = { arrivalNs ->
-                // 只有当前布局真的用到这一路，才计入延迟统计并请求渲染；
-                // 否则一路闲置的摄像头/解码器会白白把按需渲染打成连续渲染。
-                if (activeSourceKeys.contains(key)) {
-                    timing.push(arrivalNs)
-                    host?.requestRender()
-                }
+        // 统一接线：视频 / 摄像头 / 任意实现了 frameSink 的生产者都进帧时钟。
+        // 没有外部生产者的源用接口默认空实现，这里赋值不会有任何副作用。
+        source.frameSink = { arrivalNs ->
+            // 只有当前布局真的用到这一路，才计入延迟统计并请求渲染；
+            // 否则一路闲置的摄像头/解码器会白白把按需渲染打成连续渲染。
+            if (activeSourceKeys.contains(key)) {
+                timing.push(arrivalNs)
+                host?.requestRender()
             }
         }
         dirty = true
@@ -154,6 +173,14 @@ class GpuCompositor : GLSurfaceView.Renderer {
     }
 
     /**
+     * 把一段代码投到 GL 线程执行。释放 EGL / GL 对象这类必须持有上下文的操作用它，
+     * 例如录制结束后的 `VideoRecorder.releaseGl()`。
+     */
+    fun postGl(block: () -> Unit) {
+        if (!released) host?.queueEvent(block)
+    }
+
+    /**
      * View 销毁时调用（**主线程**）：只丢引用、停帧时钟，绝不碰 GLES。
      * GL 对象随 EGL 上下文由驱动回收；下次 surface 创建会重新建 program 与 FBO。
      */
@@ -163,6 +190,8 @@ class GpuCompositor : GLSurfaceView.Renderer {
         for (s in sources.values) s.onGlLost()
         passCache.clear()
         timing.close()
+        gpuTimer.onGlLost()
+        gpuTimer.close()
         host = null
     }
 
@@ -182,6 +211,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
         for (p in tilePairs) p.forgetGpu()
         blit2D = compileBlit(GfxShaders.BLIT_2D_FRAGMENT)
         blitOes = compileBlit(GfxShaders.BLIT_OES_FRAGMENT)
+        gpuTimer.onGlCreated()
 
         surfaceReady = true
         for (s in sources.values) s.onGlCreated()
@@ -197,10 +227,30 @@ class GpuCompositor : GLSurfaceView.Renderer {
         viewW = nw
         viewH = nh
         if (changed || targets.read.texture == 0) {
-            targets.ensure(nw, nh)
-            dirty = true
+            ensureTargets()
         }
         GLES20.glViewport(0, 0, nw, nh)
+    }
+
+    /* ------------------------------------------------------ 资源预算 */
+
+    /**
+     * 按预算挑一档离屏缩放。选档逻辑是 [RenderPolicy.chooseScale] 这个纯函数，
+     * 真正上报的显存数字仍是各 TargetPair 的实测尺寸之和。
+     */
+    private fun chooseScale(p: RenderPolicy): Float =
+        RenderPolicy.chooseScale(viewW, viewH, p.resolutionScale, p.maxTextureBytes)
+
+    private fun ensureTargets() {
+        val p = policy
+        appliedPolicyScale = p.resolutionScale
+        appliedBudget = p.maxTextureBytes
+        appliedScale = chooseScale(p)
+        sceneW = (viewW * appliedScale).toInt().coerceAtLeast(1)
+        sceneH = (viewH * appliedScale).toInt().coerceAtLeast(1)
+        targets.ensure(sceneW, sceneH)
+        // 尺寸变了，旧的 per-tile FBO 由 tilePairAt 的 ensure 自行重建。
+        dirty = true
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -223,6 +273,10 @@ class GpuCompositor : GLSurfaceView.Renderer {
         if (currentPolicy.mode == RenderMode.ON_DEMAND &&
             !newFrame && !dirty && !animating
         ) return
+        // 分辨率 / 显存预算是策略的一部分：变化时在真正绘制前重建离屏目标。
+        if (currentPolicy.resolutionScale != appliedPolicyScale ||
+            currentPolicy.maxTextureBytes != appliedBudget || targets.read.texture == 0
+        ) ensureTargets()
         dirty = false
         lastDrawNs = renderNs
 
@@ -230,6 +284,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
         val twoD = blit2D
         val oes = blitOes
         if (twoD == null || oes == null || targets.read.texture == 0) return
+        val timingActive = gpuTimer.begin()
 
         var draws = 0
         var passCount = 0
@@ -249,7 +304,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
             val id = source.textureId()
             if (id <= 0) continue
             val program = if (source.external) oes else twoD
-            val vp = spec.tile.toViewport(viewW, viewH)
+            val vp = spec.tile.toViewport(sceneW, sceneH)
 
             if (spec.passes.isEmpty()) {
                 // 快路径：无独立特效，直接一格一个 draw call。
@@ -291,7 +346,7 @@ class GpuCompositor : GLSurfaceView.Renderer {
         for (pass in passes) {
             if (!pass.enabled) continue
             val program = programFor(pass.fragment) ?: continue
-            runPass(program, pass, targets, t, 1f / viewW, 1f / viewH)
+            runPass(program, pass, targets, t, 1f / sceneW, 1f / sceneH)
             draws++
             passCount++
         }
@@ -305,18 +360,31 @@ class GpuCompositor : GLSurfaceView.Renderer {
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         blitTexture2D(twoD, targets.read.texture)
         draws++
+        // timer query 必须在本 context 内闭合：编码器会切走 EGL context，别把它的开销算进 GPU 时间。
+        if (timingActive) gpuTimer.end()
 
-        // 6) 指标：只统计真正渲染的帧，跳过的帧不算进 FPS
+        // 6) 可选：把最终合成纹理接给外部编码器（GL 线程，共享 EGL context 内二次渲染）。
+        frameSink?.onFrame(targets.read.texture, sceneW, sceneH, renderNs)
+
+        // 7) 指标：只统计真正渲染的帧，跳过的帧不算进 FPS
         val cpuFrameMs = (System.nanoTime() - renderNs) / 1_000_000f
         val latency = timing.drain(renderNs)
+        // native 的 dropped 是 exchange(0)，每帧都要累加，否则 0.5s 窗口里只看到最后一次。
+        windowDropped += latency[4].toInt()
         frames++
         if (t - fpsWindowStart >= 0.5f) {
             val fps = frames / (t - fpsWindowStart)
+            val dropped = windowDropped
             frames = 0
+            windowDropped = 0
             fpsWindowStart = t
             var bytes = targets.bytes()
             for (p in tilePairs) bytes += p.bytes()
             for ((key, s) in sources) if (active.contains(key)) bytes += s.byteCount()
+            // 系统级采样只在指标窗口里做一次，不进每帧热路径，也不污染它要测的 CPU 数字。
+            val sys = systemMeters?.sample()
+            val sink = frameSink
+            if (sink != null) lastEncodedFrames = sink.framesWritten()
             val snapshot = GpuStats(
                 fps = fps,
                 cpuFrameMs = cpuFrameMs,
@@ -325,8 +393,17 @@ class GpuCompositor : GLSurfaceView.Renderer {
                 textureBytes = bytes,
                 latencyP50Ms = latency[1],
                 latencyP95Ms = latency[2],
-                droppedFrames = latency[4].toInt(),
+                droppedFrames = dropped,
                 mode = currentPolicy.mode,
+                gpuFrameMs = gpuTimer.pollMs(),
+                cpuPercent = sys?.cpuPercent ?: 0f,
+                pssKb = sys?.pssKb ?: 0,
+                graphicsPssKb = sys?.graphicsPssKb ?: 0,
+                nativeHeapKb = sys?.nativeHeapKb ?: 0L,
+                powerMw = sys?.powerMw ?: -1f,
+                jitterP95Ms = latency[5],
+                resolutionScale = appliedScale,
+                encodedFrames = lastEncodedFrames,
             )
             val cb = onStats
             if (cb != null) mainHandler.post { cb(snapshot) }

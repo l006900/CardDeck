@@ -7,11 +7,13 @@
 | 扇形牌堆 / 抽牌、翻牌过场 | `CardDeck` | `com.arcana.carddeck` |
 | 几百个图元每帧变换、翻面、辉光、粒子 | `SpriteStage` | `com.arcana.carddeck` |
 | 多路视频 / 纹理拼画面，每路单独套滤镜 | `CompositeStage` | `com.arcana.gfx` |
+| 摄像头实时采集、把合成结果录成 MP4 | `CameraFrameSource` / `VideoRecorder` | `com.arcana.gfx` |
 
-三者都支持**透明叠层**：GL 只画自己的图元，其余 UI 继续用 Compose 写
+三个 UI 组件都支持**透明叠层**：GL 只画自己的图元，其余 UI 继续用 Compose 写
 （`CardDeck` 默认自带深色底，设 `background = false` 即透明）。库不画文字、不认识「牌 / 塔罗 / 抽奖」，只认 id、贴图键和位姿。
+采集与录制是两个配合 `CompositeStage` 使用的类，不是独立控件。
 
-> 目录：[安装](#安装) · [快速上手](#快速上手) · [坐标与所有权约定](#坐标与所有权约定) · [API 速查](#api-速查) · [自定义 shader](#自定义-shader) · [帧调度与性能怎么量](#帧调度与性能怎么量) · [排错](#排错) · [示例工程](#示例工程) · [边界](#边界)
+> 目录：[安装](#安装) · [快速上手](#快速上手) · [坐标与所有权约定](#坐标与所有权约定) · [API 速查](#api-速查) · [自定义 shader](#自定义-shader) · [帧调度与性能怎么量](#帧调度与性能怎么量) · [采集与录制](#采集与录制) · [排错](#排错) · [示例工程](#示例工程) · [边界](#边界)
 
 ---
 
@@ -28,7 +30,8 @@
 
 - 静态列表、几十个 View —— Compose 原生就够，上 GL 只是多一层 Surface；
 - 需要画文字、图表、输入控件 —— 库一个字都不画，请用 Compose 叠在旁边；
-- 需要解码器、播放器、音轨、音画同步、seek —— 库只接收一个 `Surface`，播放由你负责。
+- 需要自研解码器、音轨、音画同步、seek、倍速 —— 库只提供采集源和编码输出，
+  解码播放仍交给 `MediaPlayer` / ExoPlayer，库只接收它们写进的那个 `Surface`。
 
 > 判断标准：**数量 × 每帧变化量 × 特效数，三个同时大**才划算。元素少或基本不动时，这套东西没有优势。
 
@@ -92,14 +95,15 @@ dependencies {
 本仓库的 demo 工程**没有开启混淆**（`app/build.gradle.kts` 的 release 里 `optimization.enable = false`），
 所以在这里构建、运行不会触发下面这个问题。
 
-它只针对把 AAR 接进自己项目的场景：正式 app 的 release 通常会开 R8，而帧时钟用的是 JNI
-静态注册，native 符号名写死成 `Java_com_arcana_gfx_FrameTiming_nativeCreate` 这种形式，
-**同时包含完整类名和方法名**。两者任一被 R8 改名，运行时按原名就找不到符号，抛
+它只针对把 AAR 接进自己项目的场景：正式 app 的 release 通常会开 R8，而帧时钟与
+GPU 计时用的是 JNI 静态注册，native 符号名写死成 `Java_com_arcana_gfx_FrameTiming_nativeCreate`
+这种形式，**同时包含完整类名和方法名**。两者任一被 R8 改名，运行时按原名就找不到符号，抛
 `UnsatisfiedLinkError`。为此 AAR 里已随包带了下面这条保留规则，
 通过 Gradle 依赖接入时会自动合并，**你不用做任何事**：
 
 ```proguard
 -keep class com.arcana.gfx.FrameTiming { *; }
+-keep class com.arcana.gfx.GpuTimer { *; }
 ```
 
 只有当你**手工集成 AAR**（不走 Gradle 依赖、自己写 proguard 配置）时，才需要手动把这一行加进去。
@@ -291,14 +295,19 @@ fun FourUp(videoPath: String) {
 
 | 签名 | 说明 |
 | --- | --- |
-| `GpuCompositor()` | `tiles` / `passes` / `policy` / `animating` / `onStats` / `onError`；`register(key, source)` / `unregister` / `invalidate()` / `release()` |
+| `GpuCompositor()` | `tiles` / `passes` / `policy` / `animating` / `frameSink` / `onStats` / `onError`；`register(key, source)` / `unregister` / `invalidate()` / `postGl { }` / `release()` |
 | `CompositeStage(compositor, modifier, policy, onStats, onError)` | 把合成管线放进 Compose，并接管生命周期 |
-| `FrameSource` 实现 | `ExternalTextureSource(name, onSurfaceReady)`（OES 视频）、`Texture2DSource(bank, key, w, h)`（静态贴图）、`DynamicTexture2DSource(w, h, fill)`（CPU 动态纹理，可用 `active` 停帧） |
+| `FrameSource` 实现 | `ExternalTextureSource(name, onSurfaceReady, bufferWidth, bufferHeight)`（OES 视频/摄像头；`framesArrived()` 查推帧数）、`Texture2DSource(bank, key, w, h)`（静态贴图）、`DynamicTexture2DSource(w, h, fill)`（CPU 动态纹理，可用 `active` 停帧） |
+| `CameraFrameSource(context, width, height, onFailure)` | Camera2 采集源；`framesArrived()` / `rotationDeg` / `ready` / `close()` |
+| `VideoRecorder(file, width, height, fps, bitRate, onError)` | `start()` / `stop()` / `releaseGl()` / `framesWritten()` / `close()`；实现 `GpuFrameSink` |
+| `GpuFrameSink` | 自定义一帧输出接出点；`onFrame(texture, w, h, ptsNs)` 在 GL 线程回调 |
 | `Tile` / `TileSpec` / `Tiles` | 画面位置、uv 裁切、每路独立链、常用布局 |
 | `ShaderPass` / `ShaderPasses` | 自定义 GLSL 与内置预设 |
-| `RenderPolicy(mode, maxFps)` | 默认 `CONTINUOUS` / `60`；`maxFps` 取值 `1..120` |
-| `GpuStats` | `summary()` 可直接放进 HUD |
-| `FrameTiming(capacity)` | 帧延迟时钟；`System.loadLibrary` 在类初始化时自动完成 |
+| `RenderPolicy(mode, maxFps, resolutionScale, maxTextureBytes)` | 默认 `CONTINUOUS` / `60` / `1.0` / `0`；`chooseScale(w, h, maxScale, budget)` 纯函数 |
+| `GpuStats` | `summary()` / `systemLine()` / `flowLine()` 可直接放进 HUD；三行都要固定单行高度，并按可用宽度自适应字号 |
+| `FrameTiming(capacity)` | C++ 无锁帧时钟：延迟 p50/p95、丢帧、帧间隔抖动；`System.loadLibrary` 自动完成 |
+| `GpuTimer` | C++ 侧 `GL_EXT_disjoint_timer_query`；`supported` / `pollMs()`，设备不支持时返回 -1 |
+| `SystemMeters(context)` | `sample()` → `SystemSample`（进程 CPU%、PSS/native/graphics、整机功率） |
 
 内置预设：`grayscale()`、`colorGrade(brightness, contrast, saturation, warmth)`、
 `blur(radiusPx)`（返回横竖两个 pass）、`sobel(strength)`、`chromaShift(offsetPx)`、
@@ -363,23 +372,114 @@ compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开�
 | 字段 | 含义 |
 | --- | --- |
 | `fps` | 只统计**真正渲染**的帧，被策略跳过的帧不计入 |
-| `cpuFrameMs` | GL 线程该帧从进入到返回的墙钟时间（含 GLES 提交，不含 GPU 执行） |
+| `cpuFrameMs` | GL 线程该帧从进入到返回的墙钟时间（含 GLES 提交，**不含** GPU 执行） |
+| `gpuFrameMs` | `GL_EXT_disjoint_timer_query` 实测的 GPU 执行时间；`-1` = 设备不支持或本轮 disjoint 作废，HUD 应显示 `n/a`，不要拿 CPU 时间冒充 |
+| `cpuPercent` / `pssKb` / `graphicsPssKb` / `nativeHeapKb` | 进程 CPU 占用（多核可 >100%）、`Debug.MemoryInfo` 的 PSS 分项、native heap |
+| `powerMw` | 整机瞬时功率（电流 µA × 电压 mV），`-1` = 设备不给读数；**只适合同机 A/B 对比**，不是本库单独的功耗 |
 | `drawCalls` / `gpuPasses` | 这一帧实际提交的 draw call 与 pass 数 |
-| `textureBytes` | 库自己持有的 FBO + 纹理字节（不含 BufferQueue） |
-| `latencyP50Ms` / `latencyP95Ms` | 帧到达 → 被消费的延迟分布，来自 C++ 帧时钟 |
-| `droppedFrames` | 生产者入队时队列已满的次数，背压信号 |
+| `textureBytes` / `resolutionScale` | 库自己持有的 FBO + 纹理字节（不含 BufferQueue）、本帧实际生效的离屏缩放 |
+| `latencyP50Ms` / `latencyP95Ms` / `jitterP95Ms` | C++ 帧时钟**滑动窗口(240 帧)**的延迟分布与帧到达间隔抖动；不是单次 drain 的瞬时值 |
+| `droppedFrames` | 指标窗口内生产者入队时队列已满的累计次数，背压信号 |
+| `encodedFrames` | 最近一次录制会话送进编码器的帧数 |
 
-**按需渲染的两个前提**（自己写 HUD 时最容易忽略）：
+系统级采样（`Debug.getMemoryInfo`、读 `/proc/self/stat`）只在 0.5s 指标窗口里做一次，
+不进每帧热路径，采样开销也就不会污染它自己要测的 CPU 数字。
+
+**按需渲染的三个前提**（自己写 HUD 时最容易忽略）：
 
 1. HUD 文本必须**固定高度**：`maxLines = 1, softWrap = false`，并给状态行预留固定高度。
    文本在 1 行 / 2 行之间抖动会带动下方 `GLSurfaceView` 高度抖动，每次 `onSurfaceChanged`
-   都会唤醒按需渲染，看起来像"停不下来"。
-2. 完全空闲时 GL 线程不会回调 `onStats`，HUD 会停在上一次快照。自己加一个一次性延迟判定，
+   都会唤醒按需渲染，看起来像"停不下来"。提示行也一样，别写成「有错才出现」的条件分支，
+   否则错误出现/消失同样会改高度。
+2. 固定高度只挡住**纵向**换行，挡不住**横向**溢出：`softWrap = false` 时过长的一行会被
+   直接裁掉尾部。指标数字一变长（`pss 128.4 MB`、`power 264 mW`），`p95 … ms`、`drop 0`、
+   `mW` 就没了，验收数字会读错。要么按可用宽度自适应字号（`TextMeasurer` 量单行宽度后
+   收敛字号，示例工程里的 `HudLine` 就是这么做的），要么自己把数值拆成两行并给两行都留固定高度。
+3. 完全空闲时 GL 线程不会回调 `onStats`，HUD 会停在上一次快照。自己加一个一次性延迟判定，
    超过 1s 没新指标就显示「空闲 · 0 fps」，别把 0 帧显示成上一次的高 fps；**不要**用常驻轮询，
    那本身又是一次次重组。
 
 其余生命周期（页面进后台暂停 GL 线程、surface 销毁释放 GL 对象、上下文重建重传纹理）
 三个组件都已接管，不用手动调。
+
+### 动态分辨率与显存预算
+
+`RenderPolicy` 多两个字段，离屏 FBO 按 `resolutionScale` 建，最后一步线性上采样到屏幕：
+
+```kotlin
+compositor.policy = RenderPolicy(
+    mode = RenderMode.ON_DEMAND,
+    maxFps = 30,
+    resolutionScale = 0.75f,        // 手动档位，0.25..1.0
+    maxTextureBytes = 8L * 1024 * 1024,  // 0 = 不限制；非 0 时自动往下选档
+)
+```
+
+- 自动档位从 `1.0 / 0.75 / 0.5 / 0.35` 里选**第一个**满足预算的；`resolutionScale` 是上限，
+  预算宽裕也不会把你手动设的低分辨率抬高。
+- 实际生效的档位在 `GpuStats.resolutionScale`，显存收益看 `textureBytes`，别只看策略值。
+- 选档用 `w*h*16` 字节做最坏估算（主 ping-pong + 每路独立链各两张 RGBA），
+  纯函数 `RenderPolicy.chooseScale(w, h, maxScale, budget)` 可以直接单测 / 离线对照。
+
+---
+
+## 采集与录制
+
+### Camera2 实时采集
+
+`CameraFrameSource` 把摄像头预览直接写进 `SurfaceTexture`（OES 零拷贝），和视频文件回放
+走同一条合成链。**权限由你的 app 声明并动态申请**，库不替你申请：
+
+```xml
+<uses-permission android:name="android.permission.CAMERA" />
+```
+
+```kotlin
+val camera = remember {
+    CameraFrameSource(context, width = 640, height = 480) { msg -> /* 错误提示 */ }
+}
+LaunchedEffect(granted) { if (granted) compositor.register("cam", camera) }
+DisposableEffect(Unit) { onDispose { camera.close() } }
+
+compositor.tiles = listOf(
+    TileSpec("cam", Tiles.columns(2)[0]),
+    TileSpec("logo", Tiles.columns(2)[1]),
+)
+```
+
+- 没有权限不会崩，`onFailure` 收到提示，这一路只是不出画面。
+- 预览方向按 `SENSOR_ORIENTATION` 与屏幕旋转自动补进 uv 变换；特殊朝向可覆盖 `camera.rotationDeg`。
+- `camera.framesArrived()` 是采集侧累计帧数。画面黑时先查它：**0 = 采集链没建立，>0 = 采集正常**，
+  再去查布局和贴图。摄像头刚打开的第一两秒可能还没出首帧。
+- GL 上下文重建会换 Surface，内部自动关旧 session 再开。
+
+### 把合成结果录成 MP4
+
+`VideoRecorder` 把最终合成纹理送进 `MediaCodec` 的 input surface，复用 GL 线程当前的
+EGLContext、只临时切换 draw surface，全程零 CPU 回读。
+
+```kotlin
+val out = File(context.cacheDir, "composite.mp4")
+val recorder = VideoRecorder(out, width = 528, height = 656, fps = 30)
+check(recorder.start())
+compositor.frameSink = recorder
+
+// 停止
+recorder.stop()
+compositor.postGl {
+    recorder.releaseGl()          // 必须在 GL 线程
+    compositor.frameSink = null
+}
+// 等 muxer 落盘后，再用 MediaPlayer.prepare() 校验 / 回放
+recorder.close()
+```
+
+- 编码宽高建议取 GL View 的一半并**对齐 16**；部分编码器对非对齐尺寸会静默失败。
+- `stop()` 只发 EOS，MP4 由 drain 线程收尾，别立刻对同一个文件 `setDataSource`。
+- `releaseGl()` 必须用 `compositor.postGl { }` 投递；`close()` 任意线程可调。
+- 回放时**每次新建** `ExternalTextureSource`：复用同一个源时 `onGlCreated()` 会因
+  `created = true` 直接返回，MediaPlayer 会一直播着上一次打开的旧文件 fd。
+- `GpuStats.encodedFrames` 是最近一次录制会话送进编码器的帧数。
 
 ---
 
@@ -397,12 +497,20 @@ compositor.animating = true   // 有依赖 uTime 的动态 shader 时必须开�
 | 动态 shader 在 `ON_DEMAND` 下不动 | 设 `compositor.animating = true`，或改用 `CONTINUOUS` |
 | 页面回来黑屏 | 用 `CompositeStage` / `SpriteStage` / `CardDeck` 时已自动处理；若自己裸接 `GpuCompositor`，上下文重建后要重新 `register` |
 | 退到后台仍在耗电 | 同上：三个组件已接 `ON_PAUSE` / `ON_RESUME`；裸接 `GLSurfaceView` 要自己转发 |
+| 摄像头那一格全黑 | 先看 `camera.framesArrived()`：0 = 权限没给 / Camera2 没打开，看 `onFailure`；>0 = 采集正常，检查 `register` 与 `TileSpec.source`。刚打开前 1~2 秒没首帧是正常的 |
+| 摄像头画面横着 / 倒置 | `camera.rotationDeg` 默认按 sensor 与屏幕旋转算；特殊设备手动覆盖 90 / 180 / 270 |
+| 录制没文件、或 `encodedFrames` 为 0 | 编码宽高要 16 对齐；`releaseGl()` 要在 GL 线程；`stop()` 后等 drain 落盘再读文件 |
+| 回放一直在播上一次的旧视频 | 每次开启回放都新建 `ExternalTextureSource` + `MediaPlayer`，别复用 `created = true` 的旧源 |
+| HUD 显示 `gpu n/a` / `power n/a` | 设备不支持 `GL_EXT_disjoint_timer_query` 或不提供电流读数；这是如实降级，不是初始化失败 |
+| HUD 数字尾部被裁掉（`p95 53.2 r`、`power 25 m`） | 单行 `softWrap = false` 只防纵向换行，横向会硬裁。按宽度自适应字号，或拆两行并给两行都留固定高度；别直接缩短指标字符串，数值位数一变还会重现 |
+| 按需渲染停不下来、显示 1~2 fps | HUD 行数或高度变化引起 `onSurfaceChanged` 自激，见上文「按需渲染的三个前提」 |
 
 ---
 
 ## 示例工程
 
-`app/` 模块有四个可运行页面：扇形牌堆、场景图、性能对比、GPU 合成（含设备现场编码的测试视频）。
+`app/` 模块有五个可运行页面：扇形牌堆、场景图、性能对比、GPU 合成、采集·编码·回放。
+最后一页需要动态申请 `CAMERA` 权限，走的是「Camera2 → 双画面合成 → H.264/MP4 → MediaPlayer 回灌」闭环。
 
 ```bash
 ./gradlew :app:assembleDebug :carddeck:testDebugUnitTest
@@ -414,6 +522,10 @@ adb shell am start -n com.arcana.carddeck/.MainActivity
 
 ## 边界
 
-库只负责「把画面画出来」：给 `Surface` 就能接视频，给 Bitmap 就能画图元，给 GLSL 就能加特效。
-它**不提供**解码器、播放器、音频、音画同步、文字渲染或跨平台后端；FFmpeg / GStreamer、
-ExoPlayer、Camera2 都通过 `ExternalTextureSource` 的 `Surface` 契约接进来，由你自己的工程负责。
+库负责「画面从哪来、怎么合成、到哪去」：`Surface`（视频 / 摄像头）进、FBO 拼接与
+shader 链、`MediaCodec` input surface 出 MP4，整条 GPU 链零 CPU 回读；指标全部实测可量。
+
+它**不提供**解码器、播放器、音轨、音画同步、seek、文字渲染或跨平台后端。
+FFmpeg / GStreamer / ExoPlayer 的解码结果仍通过 `ExternalTextureSource` 的 `Surface`
+契约接进来；`MediaPlayer` / Camera2 由调用方自己管理生命周期。要的是一条能验证的
+GPU 渲染链，不是一个包办一切的多媒体框架。

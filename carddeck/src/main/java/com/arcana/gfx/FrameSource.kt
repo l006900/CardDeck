@@ -30,6 +30,15 @@ interface FrameSource {
 
     val textureTarget: Int
 
+    /**
+     * **生产者侧**帧到达钩子（解码线程 / 摄像头回调线程）。
+     * [GpuCompositor.register] 会自动把它接到帧时钟与按需渲染，调用方不用手动连。
+     * 默认空实现：没有外部生产者的源（静态贴图 / CPU 生成纹理）忽略即可。
+     */
+    var frameSink: ((Long) -> Unit)?
+        get() = null
+        set(_) = Unit
+
     /** GL 线程：创建纹理 / SurfaceTexture。可重复调用（幂等）。 */
     fun onGlCreated()
 
@@ -64,10 +73,14 @@ interface FrameSource {
  * [FrameTiming] 的无锁队列；GL 线程在 [update] 里做消费者侧 drain。
  *
  * @param onSurfaceReady GL 线程回调，拿到 Surface 后请切回自己的线程再交给播放器。
+ * @param bufferWidth / bufferHeight 非零时给 SurfaceTexture 设默认缓冲尺寸。
+ *   Camera2 这类**主动推流**的生产者必须设，否则预览会按 1×1 的缺省尺寸出图。
  */
 class ExternalTextureSource(
     name: String = "video",
     private val onSurfaceReady: ((Surface) -> Unit)? = null,
+    private val bufferWidth: Int = 0,
+    private val bufferHeight: Int = 0,
 ) : FrameSource {
 
     override val external: Boolean = true
@@ -75,7 +88,7 @@ class ExternalTextureSource(
 
     /** 生产者侧回调（解码线程）；典型实现是把它接到 FrameTiming.push。 */
     @Volatile
-    var frameSink: ((Long) -> Unit)? = null
+    override var frameSink: ((Long) -> Unit)? = null
 
     @Volatile
     var surface: Surface? = null
@@ -110,6 +123,7 @@ class ExternalTextureSource(
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, 0)
 
         val st = SurfaceTexture(texId)
+        if (bufferWidth > 0 && bufferHeight > 0) st.setDefaultBufferSize(bufferWidth, bufferHeight)
         st.setOnFrameAvailableListener({ _ ->
             val now = System.nanoTime()
             pendingCount++
@@ -135,6 +149,9 @@ class ExternalTextureSource(
         synchronized(matrixLock) { st.getTransformMatrix(matrix) }
         return lastArrivalNs
     }
+
+    /** 累计到达的帧数（生产者侧），用来区分「采集没推帧」和「推了但采样成黑」。 */
+    fun framesArrived(): Long = pendingCount
 
     override fun textureId(): Int = texId
 

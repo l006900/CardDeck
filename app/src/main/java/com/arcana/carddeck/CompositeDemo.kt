@@ -7,6 +7,7 @@ import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -18,11 +19,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -32,7 +35,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.arcana.gfx.CompositeStage
@@ -108,6 +116,8 @@ fun CompositeDemo() {
     var fpsCap by remember { mutableIntStateOf(30) }
     var onDemand by remember { mutableStateOf(false) }
     var useVideo by remember { mutableStateOf(true) }
+    var scale by remember { mutableFloatStateOf(1f) }
+    var budgetMb by remember { mutableIntStateOf(0) }
 
     val playerRef = remember { mutableStateOf<MediaPlayer?>(null) }
     val videoSourceRef = remember { mutableStateOf<ExternalTextureSource?>(null) }
@@ -132,7 +142,9 @@ fun CompositeDemo() {
     DisposableEffect(videoPath) {
         val path = videoPath
         if (path != null) {
-            val source = ExternalTextureSource("video") { surface ->
+            val source = ExternalTextureSource(
+                name = "video",
+                onSurfaceReady = { surface ->
                 // onSurfaceReady 在 GL 线程，MediaPlayer 必须回主线程操作。
                 mainHandler.post {
                     runCatching {
@@ -155,7 +167,8 @@ fun CompositeDemo() {
                         }
                     }.onFailure { notice = "播放器启动失败: ${it.message}" }
                 }
-            }
+            },
+            )
             videoSourceRef.value = source
             compositor.register("video", source)
         }
@@ -222,6 +235,8 @@ fun CompositeDemo() {
     val policy = RenderPolicy(
         mode = if (effectiveOnDemand) RenderMode.ON_DEMAND else RenderMode.CONTINUOUS,
         maxFps = fpsCap,
+        resolutionScale = scale,
+        maxTextureBytes = budgetMb.toLong() * 1_048_576L,
     )
 
     Column(
@@ -243,24 +258,21 @@ fun CompositeDemo() {
             // HUD 必须固定占两行：文本换行会让顶部 Column 高度变化，进而改变下方
             // GLSurfaceView 的高度 → onSurfaceChanged → 重画 → 指标刷新 → 又换行，
             // 形成 9px 级别的布局自激（按需渲染会被它永久唤醒）。
-            Text(
+            HudLine(
                 if (idle) "上次快照（非实时）· ${stats.summary()}" else stats.summary(),
                 color = if (idle) Color(0xFF727A98) else Color(0xFFD6B260),
-                fontSize = 11.sp, maxLines = 1, softWrap = false,
-                modifier = Modifier.fillMaxWidth(),
+                baseSize = 11.sp, lineHeight = 16.dp,
             )
-            Text(
+            HudLine(
                 if (idle) "空闲 · 0 fps（无渲染回调）" else "",
-                color = Color(0xFF8FE3B0), fontSize = 10.sp,
-                maxLines = 1, softWrap = false,
-                modifier = Modifier.fillMaxWidth().height(14.dp),
+                color = Color(0xFF8FE3B0),
             )
-            if (notice.isNotEmpty()) {
-                Text(
-                    notice, color = Color(0xFFFF9E80), fontSize = 11.sp,
-                    maxLines = 1, softWrap = false, modifier = Modifier.fillMaxWidth(),
-                )
-            }
+            // 这两行始终固定高度：HUD 一旦换行就会带动 GLSurfaceView 高度抖动，
+            // 进而 onSurfaceChanged → 重画 → 指标刷新 → 又换行，把按需渲染打成永久空转。
+            HudLine(stats.systemLine(), color = if (idle) Color(0xFF727A98) else Color(0xFF9BA6C8))
+            HudLine(stats.flowLine(), color = if (idle) Color(0xFF727A98) else Color(0xFF9BA6C8))
+            // 提示也常驻固定行：条件出现/消失同样会改变 Column 高度。
+            HudLine(notice, color = Color(0xFFFF9E80), baseSize = 11.sp, lineHeight = 16.dp)
             Spacer(Modifier.height(8.dp))
             Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
                 LAYOUT_NAMES.forEachIndexed { i, name ->
@@ -277,6 +289,20 @@ fun CompositeDemo() {
                 SmallButton("$fpsCap fps", true) { fpsCap = if (fpsCap == 30) 60 else 30 }
                 SmallButton("按需渲染 ${if (onDemand) "ON" else "OFF"}", onDemand) { onDemand = !onDemand }
                 SmallButton("强制重画", false) { compositor.invalidate() }
+            }
+            Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+                SmallButton("scale %.2f".format(scale), scale < 1f) {
+                    scale = when {
+                        scale > 0.99f -> 0.75f
+                        scale > 0.74f -> 0.5f
+                        scale > 0.49f -> 0.35f
+                        else -> 1f
+                    }
+                }
+                SmallButton(
+                    if (budgetMb == 0) "显存预算 OFF" else "预算 ${budgetMb}MB(自动降档)",
+                    budgetMb > 0,
+                ) { budgetMb = if (budgetMb == 0) 8 else 0 }
             }
             Spacer(Modifier.height(4.dp))
             Text(
@@ -315,6 +341,53 @@ private fun SmallButton(label: String, active: Boolean, onClick: () -> Unit) {
         Text(
             label, fontSize = 10.sp,
             color = if (active) Color(0xFF1B1430) else Color(0xFFE9D7A6),
+        )
+    }
+}
+
+/**
+ * HUD 单行：固定行高 + 按可用宽度自适应字号。
+ *
+ * 「固定高度 + maxLines=1 + softWrap=false」只挡住了纵向换行引起的布局自激，
+ * 挡不住**横向**溢出：指标数字一变长（pss 128.4 MB、power 264 mW），
+ * 尾部会被硬裁成 `p95 53.2 r` / `power 25 m`，验收数字直接不可信。
+ *
+ * 这里用 TextMeasurer 量一次单行真实宽度，按线性比例收敛字号（最多 3 次补偿
+ * 字距/字形的非线性，下限 7sp），让文本始终完整放进一行；行高依旧恒定，
+ * 所以 GLSurfaceView 的高度不会因为 HUD 内容变化而抖动。
+ */
+@Composable
+internal fun HudLine(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    baseSize: TextUnit = 10.sp,
+    lineHeight: Dp = 14.dp,
+) {
+    BoxWithConstraints(modifier = modifier.fillMaxWidth().height(lineHeight)) {
+        val measurer = rememberTextMeasurer()
+        val baseStyle = LocalTextStyle.current
+        val availablePx = with(LocalDensity.current) { maxWidth.toPx() }
+        var sizeSp = baseSize.value
+        var textWidth = measurer.measure(
+            AnnotatedString(text),
+            style = baseStyle.copy(fontSize = sizeSp.sp),
+            softWrap = false,
+            maxLines = 1,
+        ).size.width
+        repeat(3) {
+            if (textWidth <= availablePx || sizeSp <= 7f) return@repeat
+            sizeSp = (sizeSp * availablePx / textWidth).coerceAtLeast(7f)
+            textWidth = measurer.measure(
+                AnnotatedString(text),
+                style = baseStyle.copy(fontSize = sizeSp.sp),
+                softWrap = false,
+                maxLines = 1,
+            ).size.width
+        }
+        Text(
+            text = text, color = color, fontSize = sizeSp.sp,
+            maxLines = 1, softWrap = false,
         )
     }
 }
