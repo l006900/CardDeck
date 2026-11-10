@@ -41,15 +41,26 @@
 
 | 坐标 | 内容 | 什么时候用 |
 | --- | --- | --- |
-| `com.arcana:carddeck:0.5.0` | 全部：`CardDeck` / `SpriteStage` 牌桌控件 + `com.arcana.gfx` 合成层 | 要现成的牌堆 / 抽牌 / 翻面 UI |
-| `com.arcana:gfx:0.5.0` | 只有合成层：`CompositeSurfaceHost` / `GpuCompositor` / `Tiles` / `RenderPolicy` / `VideoRecorder` | 自己有渲染/控件，只要多路合成 |
+| `com.arcana:carddeck:0.5.1` | 全部：`CardDeck` / `SpriteStage` 牌桌控件 + `com.arcana.gfx` 合成层 | 要现成的牌堆 / 抽牌 / 翻面 UI |
+| `com.arcana:gfx:0.5.1` | 只有合成层：`CompositeSurfaceHost` / `GpuCompositor` / `Tiles` / `RenderPolicy` / `VideoRecorder` | 自己有渲染/控件，只要多路合成 |
 
 `carddeck` 用 `api` 依赖 `gfx`，所以**依赖 `carddeck` 的项目照样能直接用 `com.arcana.gfx.*`**，
 两者不需要重复声明。
 
-`gfx` 包内自带 `GlUtil` / `MsaaConfigChooser` / `TextureBank`，**不引用任何别的包**：
-如果你的项目里也有 `com.arcana.gl.*` 这类同名类，接进来不会有 duplicate class，也不会有
-「库的 shader 找宿主的 uniform」这种隐式耦合。
+`gfx` 包内自带 `GlUtil` / `MsaaConfigChooser` / `TextureBank`，**不引用任何别的包**，
+而且这三样对消费方**公开**：
+
+| 类 | 用途 |
+| --- | --- |
+| `GlUtil` | program 编译 / uniform 与 attrib 定位 / Bitmap 上传纹理 / 单位 quad / 16×16 卡牌网格 buffer / 颜色换算 |
+| `MsaaConfigChooser` | 4× MSAA 的 EGL 配置选择器；自建 `GLSurfaceView` 时 `setEGLConfigChooser(MsaaConfigChooser())` 即可 |
+| `TextureBank` | Bitmap → 纹理的缓存与复用（按 key 去重、超宽自动下采样） |
+
+**别在消费方再抄一份**：自己往管线里塞 `FrameSource` 时直接 `import com.arcana.gfx.GlUtil`。
+两份同名工具类最容易出现的情形是「改了一处、另一处忘了」，最后调试分不清跑的是哪份。
+
+库不引用宿主的东西，宿主也不该抄库的东西 —— 分界只有一句话：**库管「怎么把画面拼起来并送出去」，
+你管「画面里画什么」**。牌面光照、翻牌形变、粒子、牌堆几何这些内容库一概不提供，全在你自己那边写。
 
 ## 安装
 
@@ -88,8 +99,8 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.l006900.CardDeck:gfx:0.5.0")         // 只要合成层
-    // implementation("com.github.l006900.CardDeck:carddeck:0.5.0")  // 连牌桌控件一起
+    implementation("com.github.l006900.CardDeck:gfx:0.5.1")         // 只要合成层
+    // implementation("com.github.l006900.CardDeck:carddeck:0.5.1")  // 连牌桌控件一起
 }
 ```
 
@@ -109,19 +120,19 @@ R8 保留规则随 AAR 自动合并，`libarcana_frameclock.so`（两个 ABI）�
 这条路径已在两个独立工程实测（其中一个宿主自己就有 `com.arcana.gl.*` 全套引擎）：
 只写一行依赖 → 编译通过、无 duplicate class → APK 内出现 native 库 → 真机 45 fps 跑通合成。
 
-> `0.x` 阶段建议锁精确版本（`gfx:0.5.0`），别写 `0.+`：MINOR 位可能带公开 API 变更。
+> `0.x` 阶段建议锁精确版本（`gfx:0.5.1`），别写 `0.+`：MINOR 位可能带公开 API 变更。
 
 ## 发布到 JitPack
 
 三步，之后别人就能用上面那行坐标：
 
 ```bash
-git add -A && git commit -m "release 0.5.0" && git push
-git tag 0.5.0 && git push origin 0.5.0
-# 打开 https://jitpack.io/#l006900/CardDeck → Look up → 选 0.5.0 → Get it
+git add -A && git commit -m "release 0.5.1" && git push
+git tag 0.5.1 && git push origin 0.5.1
+# 打开 https://jitpack.io/#l006900/CardDeck → Look up → 选 0.5.1 → Get it
 ```
 
-**tag 名不要带 `v`**：JitPack 拿 tag 名当版本号，坐标里的 `0.5.0` 才和 POM 的 `version = "0.5.0"` 对齐。
+**tag 名不要带 `v`**：JitPack 拿 tag 名当版本号，坐标里的 `0.5.1` 才和 POM 的 `version = "0.5.1"` 对齐。
 
 `jitpack.yml` 已经处理好三个容易翻车的点：
 
@@ -132,7 +143,7 @@ git tag 0.5.0 && git push origin 0.5.0
 构建完成后自检：
 
 ```bash
-curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.5.0/gfx-0.5.0.aar | head -1
+curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.5.1/gfx-0.5.1.aar | head -1
 # HTTP/1.1 200 OK 就说明 AAR 已生成，全世界都能解析
 ```
 
@@ -144,7 +155,7 @@ curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.5.0/gfx-0.5.0.aar 
 代价是首次发布要人工几步：
 
 1. Group 必须换：`com.arcana` 需要证明拥有 `arcana.com` 域名，一般用
-   `io.github.l006900`（GitHub 用户名即可验证）。坐标会变成 `io.github.l006900:gfx:0.5.0`。
+   `io.github.l006900`（GitHub 用户名即可验证）。坐标会变成 `io.github.l006900:gfx:0.5.1`。
 2. [central.sonatype.com](https://central.sonatype.com) 注册命名空间 → 验证。
 3. 生成 GPG 密钥并配置 `signing` 插件（AAR 也要签）。
 4. `./gradlew publishToMavenCentral`（或上传 zip bundle），审核通过后全世界可解析。

@@ -11,8 +11,11 @@ import javax.microedition.khronos.egl.EGLDisplay
  * GLSurfaceView 自带的 `setEGLConfigChooser(8,8,8,8,16,0)` 没有 sample 参数，
  * 想要多重采样必须自己走 `eglChooseConfig` 指定 `EGL_SAMPLE_BUFFERS / EGL_SAMPLES`。
  * 同时声明 `EGL_ALPHA_SIZE = 8`，透明背景（叠在别的 UI 之上）才有 alpha 通道可用。
+ *
+ * 公开给消费方：自建 GLSurfaceView 时直接 `setEGLConfigChooser(MsaaConfigChooser())`
+ * 即可拿到与 [CompositeSurfaceHost] 同一套窗口配置，不必各写一遍 `eglChooseConfig`。
  */
-internal class MsaaConfigChooser : GLSurfaceView.EGLConfigChooser {
+class MsaaConfigChooser : GLSurfaceView.EGLConfigChooser {
 
     override fun chooseConfig(egl: EGL10, display: EGLDisplay): EGLConfig? =
         pick(egl, display, 4) ?: pick(egl, display, 0)
@@ -34,7 +37,14 @@ internal class MsaaConfigChooser : GLSurfaceView.EGLConfigChooser {
         if (!egl.eglChooseConfig(display, attrs, null, 0, num) || num[0] <= 0) return null
         val configs = arrayOfNulls<EGLConfig>(num[0])
         if (!egl.eglChooseConfig(display, attrs, configs, num[0], num) || num[0] <= 0) return null
-        return configs.firstOrNull { it != null }
+        val picked = configs.firstOrNull { it != null } ?: return null
+        // 实际拿到的采样数：不要以为「请求了 4×」就一定给了 4×（部分驱动会静默降级）。
+        // 现场排查「边缘有锯齿」时先看这行。
+        val got = IntArray(1)
+        if (egl.eglGetConfigAttrib(display, picked, EGL10.EGL_SAMPLES, got)) {
+            android.util.Log.i("Gfx", "EGL msaa samples = ${got[0]}")
+        }
+        return picked
     }
 
     private companion object {

@@ -6,7 +6,7 @@ plugins {
 
 // 发布坐标。依赖方只认 com.arcana:gfx，模块内部怎么拆都不影响写法。
 group = "com.arcana"
-version = "0.5.0"
+version = "0.5.1"
 
 // 多路画面合成层：FrameSource（视频 / 相机 / 程序化纹理统一成一路源）→
 // GpuCompositor（FBO 拼接 + 逐路 shader 链 + 全局后处理）→ 录制 / 显示。

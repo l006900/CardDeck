@@ -9,13 +9,19 @@ import java.nio.FloatBuffer
 import java.nio.ShortBuffer
 
 /**
- * GL 公共工具：program 编译 / 纹理上传 / quad buffer / 颜色换算。
+ * GL 公共工具：program 编译 / 纹理上传 / quad 与卡牌网格 buffer / 颜色换算。
  *
- * 抽卡引擎 [DrawEngine] 与牌桌引擎 [TableEngine] 共用这套底层动作，但各自持有
- * 引用（不互相依赖）—— 这里集中一份，谁要用谁调，避免两处各抄一遍还容易漂。
+ * 合成管线自身（[GpuCompositor] / [VideoRecorder] / [TextureBank]）用的就是这一套；
+ * 同时对消费方公开 —— 自己往管线里塞一路 [FrameSource] 时，画牌/画背景要的
+ * shader 编译、单位 quad、细分网格、Bitmap 上传都在这里，不必再抄一遍。
+ *
+ * 唯一需要留意的共享状态是那几个静态 buffer（[QUAD_POS] / [MESH_POS] 等）：
+ * 它们是只读的，多个引擎复用没问题；但 `position()` 会被 [bindQuad] / [bindMesh]
+ * 重置，所以**别在另一个线程边读边绑**。所有方法都要求当前线程已绑定 GL context。
+ *
  * 纯 framework API，无三方依赖、无 Compose。
  */
-internal object GlUtil {
+object GlUtil {
 
     /** 单位 quad（TRIANGLE_STRIP）：pos 与 uv 分开两个 buffer。 */
     val QUAD_POS: FloatBuffer = wrap(floatArrayOf(-1f, -1f, 1f, -1f, -1f, 1f, 1f, 1f))
