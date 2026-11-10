@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 /**
  * GLSL 源码。ES 2.0 起步（minSdk 24 全覆盖），不用 ES 3 特性 —— 桌面渲染的

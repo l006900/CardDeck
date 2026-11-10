@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -8,6 +8,7 @@ import android.opengl.Matrix
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.abs
+import com.arcana.gfx.GlUtil
 
 /**
  * 扇形牌堆的渲染契约 —— 与 [GlEngine]（自由桌面）/ [DrawController]（发牌序列）**并列**的第三种引擎。

@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 /**
  * 引擎工厂 —— 库对外的唯一「造引擎」入口。

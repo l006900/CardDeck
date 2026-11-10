@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 import android.annotation.SuppressLint
 import android.app.ActivityManager
@@ -9,6 +9,7 @@ import android.view.MotionEvent
 import com.arcana.carddeck.Pick
 import com.arcana.carddeck.Scene
 import kotlin.math.abs
+import com.arcana.gfx.MsaaConfigChooser
 
 /**
  * 场景的 GL 宿主 View：只做「触摸 → 命中/拖动」的翻译，不出现任何业务类型。

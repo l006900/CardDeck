@@ -2,7 +2,7 @@ package com.arcana.carddeck
 
 import android.graphics.Bitmap
 import android.opengl.GLES20
-import com.arcana.gl.GlUtil
+import com.arcana.gfx.GlUtil
 
 /**
  * 贴图注册表：把「调用方给的 Bitmap」变成「GL 线程能用的纹理 id」。

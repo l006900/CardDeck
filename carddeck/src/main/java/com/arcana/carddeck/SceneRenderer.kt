@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
@@ -16,6 +16,7 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.PI
 import kotlin.math.sin
+import com.arcana.gfx.GlUtil
 
 /**
  * 通用 2.5D 场景渲染器 —— **不认识塔罗、不认识牌、不认识业务**。
@@ -44,6 +45,24 @@ class SceneRenderer(
     /** 自带渐变底的两种颜色（ARGB），由 [SpriteStage] 传入。 */
     var backdropInner: Int = 0xFF1B2140.toInt()
     var backdropOuter: Int = 0xFF070A14.toInt()
+
+    /**
+     * 相机距离（决定 [Pose.z] 的透视强度）：`w = 1 - z / eyeZ`。
+     *
+     * `z = 0` 时 `w = 1`，投影与正交**逐像素一致** —— 不用 z 的调用方不会看到任何变化。
+     * `z = 0.435 · eyeZ` 约等于把内容推到"眼前翻牌"的距离（放大 1.77 倍），与桌面牌引擎
+     * 里 `EYE_Z = 4.6 / 推进 2.0` 的那档观感对齐。
+     *
+     * 必须在 GL 线程改（[onSurfaceChanged] 之后重建投影），UI 线程改了要 [GLSurfaceView.requestRender]。
+     */
+    @Volatile
+    var eyeZ: Float = 1f
+        set(value) {
+            field = value.coerceAtLeast(0.05f)
+            rebuildProjection = true
+        }
+
+    private var rebuildProjection = false
 
     private val proj = FloatArray(16)
     private val projNdc = FloatArray(16)
@@ -201,12 +220,42 @@ class SceneRenderer(
         viewW = w.coerceAtLeast(1)
         viewH = h.coerceAtLeast(1)
         GLES20.glViewport(0, 0, viewW, viewH)
-        // 屏幕坐标 y 向下：top=0 → NDC +1（屏幕顶），bottom=h → NDC -1（屏幕底）。
-        Matrix.orthoM(proj, 0, 0f, viewW.toFloat(), viewH.toFloat(), 0f, -1f, 1f)
+        buildProjection()
         Matrix.orthoM(projNdc, 0, -1f, 1f, -1f, 1f, -1f, 1f)
     }
 
+    /**
+     * 像素坐标 → NDC，**带深度**：`w = 1 - z / eyeZ`。
+     *
+     * 为什么不用 `frustumM + setLookAtM`：那套要摆相机、定 up 轴向，y 向下时
+     * 很容易把 x 一起翻反（`up = (0,-1,0)` 会让 right 变成 (-1,0,0)）。
+     * 这里直接写出矩阵，`z = 0` 时与 `orthoM(0, W, H, 0)` 逐元素等价：
+     *
+     * ```
+     * x_ndc = x/(W/2) - 1        y_ndc = 1 - y/(H/2)        w = 1 - z/eyeZ
+     * ```
+     *
+     * z > 0 时 w < 1，同一份几何被除小 → 画得更大（靠近镜头），且不同 z 的图元
+     * 大小比例不同，翻牌、抬手才有真的近大远小。z 分量不参与裁剪（深度测试没开，
+     * 绘制顺序即层级）。
+     */
+    private fun buildProjection() {
+        val halfW = viewW / 2f
+        val halfH = viewH / 2f
+        java.util.Arrays.fill(proj, 0f)
+        proj[0] = 1f / halfW      // x → NDC
+        proj[5] = -1f / halfH     // y 反向：屏幕 y 向下
+        proj[11] = -1f / eyeZ     // w = 1 - z/eyeZ
+        proj[12] = -1f            // x 平移：像素 0 → 左边缘
+        proj[13] = 1f             // y 平移：像素 0 → 上边缘
+        proj[15] = 1f
+    }
+
     override fun onDrawFrame(gl: GL10?) {
+        if (rebuildProjection) {
+            buildProjection()
+            rebuildProjection = false
+        }
         val t = (System.nanoTime() - startNanos) / 1_000_000_000f
         textures.flushUploads()
         scene.consumeDirty()
@@ -268,7 +317,7 @@ class SceneRenderer(
         GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
         GLES20.glUniformMatrix4fv(
             h.backdropMvp, 1, false,
-            matrixAt(viewW / 2f, viewH / 2f, 0f, viewW / 2f, viewH / 2f), 0,
+            matrixAt(viewW / 2f, viewH / 2f, 0f, 0f, viewW / 2f, viewH / 2f), 0,
         )
         GLES20.glUniform2f(h.backdropResolution, viewW.toFloat(), viewH.toFloat())
         val inner = GlUtil.argbToRgb(backdropInner)
@@ -306,7 +355,7 @@ class SceneRenderer(
             GLES20.glUniformMatrix4fv(
                 h.shadowMvp, 1, false,
                 matrixAt(
-                    p.x * viewW, p.y * viewH + halfH * 0.86f, p.rotation,
+                    p.x * viewW, p.y * viewH + halfH * 0.86f, 0f, p.rotation,
                     halfW * (1.18f + p.lift), halfH * (0.46f + p.lift * 0.6f),
                 ), 0,
             )
@@ -329,7 +378,7 @@ class SceneRenderer(
             GLES20.glUniform1f(h.haloStrength, e.halo)
             GLES20.glUniformMatrix4fv(
                 h.haloMvp, 1, false,
-                matrixAt(p.x * viewW, p.y * viewH, p.rotation, halfW * 1.9f, halfH * 1.55f), 0,
+                matrixAt(p.x * viewW, p.y * viewH, p.z, p.rotation, halfW * 1.9f, halfH * 1.55f), 0,
             )
             GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4)
         }
@@ -372,14 +421,14 @@ class SceneRenderer(
 
             GLES20.glUniformMatrix4fv(
                 h.spriteMvp, 1, false,
-                matrixAt(p.x * viewW, p.y * viewH, p.rotation, halfW, halfH), 0,
+                matrixAt(p.x * viewW, p.y * viewH, p.z, p.rotation, halfW, halfH), 0,
             )
             GLES20.glUniform1f(h.spriteAngle, angle)
             GLES20.glUniform1f(h.spriteBend, bend)
             GLES20.glUniform1f(h.spriteGlow, n.effects.glow)
             GLES20.glUniform1f(h.spriteFoil, n.effects.foil)
             GLES20.glUniform1f(h.spriteAlpha, p.alpha)
-            GLES20.glUniform1f(h.spriteReversed, 0f)
+            GLES20.glUniform1f(h.spriteReversed, if (p.reversed) 1f else 0f)
             GlUtil.drawMesh()
         }
         // 释放属性数组绑定，避免下一帧别的 pass 误用
@@ -421,12 +470,16 @@ class SceneRenderer(
         for (a in attribs) GLES20.glDisableVertexAttribArray(a)
     }
 
-    /** 单位 quad(-1..1) → 屏幕像素矩形；正角在 y 向下的投影里表现为顺时针。 */
+    /**
+     * 单位 quad(-1..1) → 屏幕像素矩形；正角在 y 向下的投影里表现为顺时针。
+     *
+     * [z] 是朝镜头的深度（像素无关，见 [Pose.z]）：0 = 桌面平面，正 = 靠近镜头并被投影放大。
+     */
     private fun matrixAt(
-        cx: Float, cy: Float, rotationDeg: Float, halfW: Float, halfH: Float,
+        cx: Float, cy: Float, z: Float, rotationDeg: Float, halfW: Float, halfH: Float,
     ): FloatArray {
         Matrix.setIdentityM(model, 0)
-        Matrix.translateM(model, 0, cx, cy, 0f)
+        Matrix.translateM(model, 0, cx, cy, z)
         Matrix.rotateM(model, 0, rotationDeg, 0f, 0f, 1f)
         Matrix.scaleM(model, 0, halfW, halfH, 1f)
         Matrix.multiplyMM(mvp, 0, proj, 0, model, 0)

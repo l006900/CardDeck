@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 import android.annotation.SuppressLint
 import android.app.ActivityManager
@@ -8,6 +8,7 @@ import android.opengl.GLSurfaceView
 import android.view.MotionEvent
 import kotlin.math.abs
 import kotlin.math.min
+import com.arcana.gfx.MsaaConfigChooser
 
 /**
  * 扇形牌堆的**专属宿主 View** —— 与 [GLSurfaceHost]（自由桌面）并列，互不复用。

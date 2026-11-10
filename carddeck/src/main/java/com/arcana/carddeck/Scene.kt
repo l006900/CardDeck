@@ -15,6 +15,11 @@ import kotlin.math.sin
  * 中间值由顶点着色器做纸张弯曲 + 菲涅尔金边，是翻面动画的驱动量（库不认识"牌"）。
  * `lift` 是离桌高度（世界单位的相对量），只驱动假阴影与体积光晕，不改变屏幕位置。
  *
+ * `z` 是**朝观察者的深度**：`0` = 桌面平面（默认，与正交投影完全等价），正值 = 靠近镜头
+ * （同等内容画得更大，翻牌时"拿到眼前"就是这个），负值 = 退远变小。
+ * 深度换算见 [SceneRenderer.eyeZ]：`w = 1 - z/eyeZ`，`z = eyeZ` 会落到相机上。
+ * `reversed` 是正逆位开关，只影响图元着色器里的上下翻转（塔罗逆位用），不改变几何。
+ *
  * 全部字段不可变：`Scene` 每帧给 GL 线程的是一份快照，[Motion] 返回新的 [Pose] 而不是改旧值，
  * 这样跨线程不需要锁住每个字段。
  */
@@ -28,6 +33,8 @@ data class Pose(
     val alpha: Float = 1f,
     val flip: Float = 0f,
     val lift: Float = 0f,
+    val z: Float = 0f,
+    val reversed: Boolean = false,
 ) {
     /** 返回一个只改动指定字段的副本，供 [Motion] 每帧生成新位姿（零副作用）。 */
     fun copyWith(
@@ -38,7 +45,9 @@ data class Pose(
         alpha: Float = this.alpha,
         flip: Float = this.flip,
         lift: Float = this.lift,
-    ): Pose = Pose(x, y, width, height, rotation, scale, alpha, flip, lift)
+        z: Float = this.z,
+        reversed: Boolean = this.reversed,
+    ): Pose = Pose(x, y, width, height, rotation, scale, alpha, flip, lift, z, reversed)
 }
 
 /**

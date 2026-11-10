@@ -1,4 +1,4 @@
-package com.arcana.gl
+package com.arcana.carddeck
 
 import kotlin.math.PI
 import kotlin.math.abs

@@ -37,12 +37,23 @@
 
 ---
 
+## 0.6.0 变更（**breaking**）
+
+- **包名统一**：`com.arcana.gl.*` 全部并入 `com.arcana.carddeck.*`。
+  以前 `carddeck` artifact 里还留着一整套 `com.arcana.gl` 的类（`DeckGeometry` / `DeckEngine` /
+  `DeckSurfaceHost` / `GlShaders` / `GlUtil` / `MsaaConfigChooser`），和消费方自己的同名源码互斥——
+  只要项目里有 `com.arcana.gl` 包，就**永远无法同时依赖本库**（duplicate class）。现在这个包在库里不存在了。
+  同时 `GlUtil` / `MsaaConfigChooser` 只剩 `com.arcana.gfx` 那一份。
+- **牌堆只有一个入口**：`CardDeck()`。`DeckSurfaceHost` / `DeckEngine` / `GlEngines` 不再是公开 API。
+- **`Pose` 新增 `z` 与 `reversed`**：`z` 是朝镜头的深度（默认 `0`，此时投影与正交**逐像素一致**），
+  `SceneRenderer.eyeZ` 控制透视强度（`w = 1 - z/eyeZ`）；`reversed` 是正逆位开关，只翻转贴图不改几何。
+
 ## 两个 artifact，按需选
 
 | 坐标 | 内容 | 什么时候用 |
 | --- | --- | --- |
-| `com.arcana:carddeck:0.5.1` | 全部：`CardDeck` / `SpriteStage` 牌桌控件 + `com.arcana.gfx` 合成层 | 要现成的牌堆 / 抽牌 / 翻面 UI |
-| `com.arcana:gfx:0.5.1` | 只有合成层：`CompositeSurfaceHost` / `GpuCompositor` / `Tiles` / `RenderPolicy` / `VideoRecorder` | 自己有渲染/控件，只要多路合成 |
+| `com.arcana:carddeck:0.6.0` | 全部：`CardDeck` / `SpriteStage` 牌桌控件 + `com.arcana.gfx` 合成层 | 要现成的牌堆 / 抽牌 / 翻面 UI |
+| `com.arcana:gfx:0.6.0` | 只有合成层：`CompositeSurfaceHost` / `GpuCompositor` / `Tiles` / `RenderPolicy` / `VideoRecorder` | 自己有渲染/控件，只要多路合成 |
 
 `carddeck` 用 `api` 依赖 `gfx`，所以**依赖 `carddeck` 的项目照样能直接用 `com.arcana.gfx.*`**，
 两者不需要重复声明。
@@ -99,8 +110,8 @@ dependencyResolutionManagement {
 
 // app/build.gradle.kts
 dependencies {
-    implementation("com.github.l006900.CardDeck:gfx:0.5.1")         // 只要合成层
-    // implementation("com.github.l006900.CardDeck:carddeck:0.5.1")  // 连牌桌控件一起
+    implementation("com.github.l006900.CardDeck:gfx:0.6.0")         // 只要合成层
+    // implementation("com.github.l006900.CardDeck:carddeck:0.6.0")  // 连牌桌控件一起
 }
 ```
 
@@ -120,19 +131,19 @@ R8 保留规则随 AAR 自动合并，`libarcana_frameclock.so`（两个 ABI）�
 这条路径已在两个独立工程实测（其中一个宿主自己就有 `com.arcana.gl.*` 全套引擎）：
 只写一行依赖 → 编译通过、无 duplicate class → APK 内出现 native 库 → 真机 45 fps 跑通合成。
 
-> `0.x` 阶段建议锁精确版本（`gfx:0.5.1`），别写 `0.+`：MINOR 位可能带公开 API 变更。
+> `0.x` 阶段建议锁精确版本（`gfx:0.6.0`），别写 `0.+`：MINOR 位可能带公开 API 变更。
 
 ## 发布到 JitPack
 
 三步，之后别人就能用上面那行坐标：
 
 ```bash
-git add -A && git commit -m "release 0.5.1" && git push
-git tag 0.5.1 && git push origin 0.5.1
-# 打开 https://jitpack.io/#l006900/CardDeck → Look up → 选 0.5.1 → Get it
+git add -A && git commit -m "release 0.6.0" && git push
+git tag 0.6.0 && git push origin 0.6.0
+# 打开 https://jitpack.io/#l006900/CardDeck → Look up → 选 0.6.0 → Get it
 ```
 
-**tag 名不要带 `v`**：JitPack 拿 tag 名当版本号，坐标里的 `0.5.1` 才和 POM 的 `version = "0.5.1"` 对齐。
+**tag 名不要带 `v`**：JitPack 拿 tag 名当版本号，坐标里的 `0.6.0` 才和 POM 的 `version = "0.6.0"` 对齐。
 
 `jitpack.yml` 已经处理好三个容易翻车的点：
 
@@ -143,7 +154,7 @@ git tag 0.5.1 && git push origin 0.5.1
 构建完成后自检：
 
 ```bash
-curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.5.1/gfx-0.5.1.aar | head -1
+curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.6.0/gfx-0.6.0.aar | head -1
 # HTTP/1.1 200 OK 就说明 AAR 已生成，全世界都能解析
 ```
 
@@ -155,7 +166,7 @@ curl -sI https://jitpack.io/com/github/l006900/CardDeck/gfx/0.5.1/gfx-0.5.1.aar 
 代价是首次发布要人工几步：
 
 1. Group 必须换：`com.arcana` 需要证明拥有 `arcana.com` 域名，一般用
-   `io.github.l006900`（GitHub 用户名即可验证）。坐标会变成 `io.github.l006900:gfx:0.5.1`。
+   `io.github.l006900`（GitHub 用户名即可验证）。坐标会变成 `io.github.l006900:gfx:0.6.0`。
 2. [central.sonatype.com](https://central.sonatype.com) 注册命名空间 → 验证。
 3. 生成 GPG 密钥并配置 `signing` 插件（AAR 也要签）。
 4. `./gradlew publishToMavenCentral`（或上传 zip bundle），审核通过后全世界可解析。
@@ -411,7 +422,7 @@ fun FourUp(videoPath: String) {
 | `CardDeck(cardIds, modifier, drawnIds, enabled, background, backBitmap, emptyText, onPick)` | 扇形牌堆；默认 `background = true`。`onPick: (String, RevealRect) -> Unit` |
 | `SpriteStage(scene, textures, modifier, background, starfield, gesturesEnabled, onPick, onDrag, onFps)` | 2.5D 场景；默认 `background = false`（透明） |
 | `Scene()` | `submit(list)` / `update { }` / `motion` / `burst(nx, ny, color, count)` / `starfield` / `background` / `size` / `hitTest(...)` |
-| `Pose` / `Effects` / `Node` / `Pick` / `Motion` | 场景图的数据类与每帧位姿函数 |
+| `Pose` / `Effects` / `Node` / `Pick` / `Motion` | 场景图的数据类与每帧位姿函数。`Pose.z` 是朝镜头的深度（0 = 桌面平面，与正交一致）、`Pose.reversed` 是正逆位；`SceneRenderer.eyeZ` 调透视强度 |
 | `Layouts.fan / grid / stack / scatter / arc` | 返回 `List<Pose>` 的纯函数 |
 | `TextureBank` | `register(key, bitmap)` / `registerAll(map)` / `clear()` |
 | `RevealRect(cx, cy, width, height, rotation)` | 点中牌在根坐标系里的几何，单位 px |

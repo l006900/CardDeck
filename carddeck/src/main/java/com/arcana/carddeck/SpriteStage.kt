@@ -12,8 +12,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.arcana.gl.SceneRenderer
-import com.arcana.gl.SpriteSurfaceHost
 
 /**
  * **SpriteStage** —— 在 Compose 里放一层 GPU 驱动的 2.5D 场景。

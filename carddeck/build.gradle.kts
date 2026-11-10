@@ -6,7 +6,7 @@ plugins {
 
 // 发布坐标。依赖方只认 group + artifactId，模块怎么拆对它透明。
 group = "com.arcana"
-version = "0.5.1"
+version = "0.6.0"
 
 android {
     namespace = "com.arcana.carddeck.lib"
