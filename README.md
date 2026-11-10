@@ -47,12 +47,19 @@
 - **牌堆只有一个入口**：`CardDeck()`。`DeckSurfaceHost` / `DeckEngine` / `GlEngines` 不再是公开 API。
 - **`Pose` 新增 `z` 与 `reversed`**：`z` 是朝镜头的深度（默认 `0`，此时投影与正交**逐像素一致**），
   `SceneRenderer.eyeZ` 控制透视强度（`w = 1 - z/eyeZ`）；`reversed` 是正逆位开关，只翻转贴图不改几何。
+- **牌桌 / 抽卡的 GL 实现整体入库**：GLSL、两个 `GLSurfaceView` 宿主、`Renderer`、
+  场景状态机、翻牌时间轴、手势机、FBO 合成适配器全部搬进 `com.arcana.carddeck.gl`
+  子包（单独的子包是为了不与本包已有的 `GlShaders` / `GlEngines` 撞名）。
+  消费方的 Android 工程里**不再需要写任何 GLSL / SurfaceView / Renderer**。
+- **`GlEngine` 不再继承 `GLSurfaceView.Renderer`**：改成纯 Kotlin 的
+  `onGlCreated()` / `onGlResized(w, h)` / `onGlFrame()`，库内用 `GlRenderer` 适配。
+  业务侧拿到的接口里没有一个 Android GL 类型。
 
 ## 两个 artifact，按需选
 
 | 坐标 | 内容 | 什么时候用 |
 | --- | --- | --- |
-| `com.arcana:carddeck:0.6.0` | 全部：`CardDeck` / `SpriteStage` 牌桌控件 + `com.arcana.gfx` 合成层 | 要现成的牌堆 / 抽牌 / 翻面 UI |
+| `com.arcana:carddeck:0.6.0` | 全部：`CardDeck` / `SpriteStage` 控件、塔罗牌桌与抽卡的 GL 引擎（`com.arcana.carddeck.gl`）、`com.arcana.gfx` 合成层 | 要现成的牌堆 / 牌桌 / 抽牌 / 翻面 |
 | `com.arcana:gfx:0.6.0` | 只有合成层：`CompositeSurfaceHost` / `GpuCompositor` / `Tiles` / `RenderPolicy` / `VideoRecorder` | 自己有渲染/控件，只要多路合成 |
 
 `carddeck` 用 `api` 依赖 `gfx`，所以**依赖 `carddeck` 的项目照样能直接用 `com.arcana.gfx.*`**，
@@ -70,8 +77,16 @@
 **别在消费方再抄一份**：自己往管线里塞 `FrameSource` 时直接 `import com.arcana.gfx.GlUtil`。
 两份同名工具类最容易出现的情形是「改了一处、另一处忘了」，最后调试分不清跑的是哪份。
 
-库不引用宿主的东西，宿主也不该抄库的东西 —— 分界只有一句话：**库管「怎么把画面拼起来并送出去」，
-你管「画面里画什么」**。牌面光照、翻牌形变、粒子、牌堆几何这些内容库一概不提供，全在你自己那边写。
+**推荐在消费方留一层很薄的中间层**：库负责「怎么画」（GLSL / 宿主 View / Renderer /
+合成管线 / 牌面光照与翻牌形变），业务代码只提交「画面里是什么」（牌列表、正逆位、
+落点、桌布色、Bitmap）。中间层通常只有三件事：
+
+1. 一行依赖坐标 —— 全工程只有这里出现库的 group/artifact；
+2. 把库的公开类型收敛成业务侧稳定契约（`typealias` 即可，零运行时开销）；
+3. 把宿主 View 的创建 / 生命周期 / 手势回调包成业务用的 Compose 入口。
+
+这样业务模块既不 import `com.arcana.carddeck.*`，也不写一行 GL 代码；换库时只改中间层。
+`carddeck` 里的 `com.arcana.carddeck.gl` 是**现成的塔罗牌桌实现**，不要在自己工程里再抄一份。
 
 ## 安装
 
@@ -426,6 +441,20 @@ fun FourUp(videoPath: String) {
 | `Layouts.fan / grid / stack / scatter / arc` | 返回 `List<Pose>` 的纯函数 |
 | `TextureBank` | `register(key, bitmap)` / `registerAll(map)` / `clear()` |
 | `RevealRect(cx, cy, width, height, rotation)` | 点中牌在根坐标系里的几何，单位 px |
+
+### `com.arcana.carddeck.gl`（塔罗牌桌 / 抽卡引擎）
+
+| 签名 | 说明 |
+| --- | --- |
+| `GlEngines.table(config)` / `GlEngines.draw(config)` | 牌桌引擎 / 抽卡演出引擎工厂 |
+| `GlEngine` | 业务契约：`submit(cards, norm)` / `setSpreadOverlay` / `setCloth` / `hitTest` / `dragStart·Move·End` / `tapCard`；纹理注入 `faceLoader` / `backBitmap`；回调 `onCardMoved` / `onCardFlipped` / `onCardActivated` |
+| `GlConfig` / `TableCard` / `DrawPhase` / `DrawController` | 纯数据契约，`DrawController` 多出 `deal` / `revealNext` / `revealAll` / `reset` / `phase` |
+| `GlFlipTiming` | 翻面三段时间表（毫秒），GL 与 Compose 文字动画共用，避免两边各写一份 |
+| `GLSurfaceHost(context, engine)` | 直连窗口的 `GLSurfaceView` 宿主（ES 3 优先 + 4× MSAA） |
+| `composite.CompositeTableHost(context, engine)` | 把引擎接进 `GpuCompositor` 的宿主：FBO + MSAA resolve，`compositor` 可继续加源 / 挂后处理 / 接录制 |
+| `composite.GlEngineSource(engine, useMsaa)` | 把任意 `GlEngine` 包成 `FrameSource`，业务引擎一行都不用改 |
+
+`GlRenderer`（`GLSurfaceView.Renderer` 适配器）是库内部实现，不对外暴露。
 
 ### `com.arcana.gfx`
 
